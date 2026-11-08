@@ -1,0 +1,30 @@
+1 ICON "assets/hishare.ico"
+
+1 VERSIONINFO
+FILEVERSION 1,8,0,0
+PRODUCTVERSION 1,8,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName", "LCH"
+            VALUE "FileDescription", "HiShare（命令行）"
+            VALUE "FileVersion", "1.8.0"
+            VALUE "InternalName", "hishare-cli"
+            VALUE "LegalCopyright", "Copyright (c) 2026 LCH"
+            VALUE "OriginalFilename", "hishare-cli.exe"
+            VALUE "ProductName", "HiShare"
+            VALUE "ProductVersion", "1.8.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END
