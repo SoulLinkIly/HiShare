@@ -1,5 +1,3 @@
-//! 传输公共层：帧加解密、TLV 列表、文件元数据与分块常量。
-
 use rand::RngCore;
 
 use crate::auth::{open_envelope, require_tlv};

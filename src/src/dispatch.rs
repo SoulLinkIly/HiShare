@@ -1,5 +1,3 @@
-//! 发送调度：按设备占槽、最多 4 路真并发，并把失败归并回 UI。
-
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -15,8 +13,6 @@ pub fn active_count() -> usize {
     ACTIVE.lock().map(|l| l.len()).unwrap_or(0)
 }
 
-/// 发送过程的用户可见状态。以前它塞在一个全局 `Option<String>` 里，
-/// 只有托盘自己读，CLI 完全看不到，浮窗还各记一份。现在统一走日志出口。
 fn note(text: impl Into<String>) {
     crate::report::log(&text.into());
 }
@@ -88,8 +84,7 @@ fn start(
                     "已排队 {count} 个文件（同一目标在发 / 前面还有 {} 个任务）",
                     n - 1
                 ));
-                // 拖进去的文件没立刻开始发，屏幕上必须先说一句「收到，排队了」；
-                // 否则用户看到的就是「拖了但没反应」，很容易再拖一遍变成重复发送。
+
                 toast(
                     "已排队",
                     &format!(
@@ -134,16 +129,14 @@ fn start(
             };
             #[cfg(not(windows))]
             let log = |_line: &str| {};
-            // 浮窗显示「发给谁」而不是文件名；begin() 会取走这个线程里的名字。
+
             crate::progress::set_target(&peer.name);
             let outcome =
                 crate::outbound::transmit(&peer.host, peer.port, &paths, &display_name, &log);
             match outcome {
                 Ok(report) => {
                     crate::peers::mark_verdict(&peer.host, crate::peers::Verdict::Open);
-                    // 与接收侧的「收到 N 个文件 · X · 来自 设备」对称：
-                    // 数量、体积、对端，一眼看完。体积按量级换单位，
-                    // 五百 KB 的图不会写成「0.0 MB」。
+
                     let message = format!(
                         "已发送 {} 个文件 · {} → {}",
                         report.files.len(),
@@ -201,8 +194,7 @@ fn drain_pending() {
             paths.len(),
             peer.name
         ));
-        // 取出来之后先留一份：如果这一轮起不来（目标还忙、或线程创不出来），
-        // 要原样放回队首。以前这里是"取出即丢"，起不来那笔发送就静默消失了。
+
         let backup = (peer.clone(), paths.clone(), display.clone());
         match start(peer, paths, display, false) {
             Ok(_) => continue,
@@ -217,10 +209,6 @@ fn drain_pending() {
     }
 }
 
-/// 同时发往多台设备（「发送目标」里可以勾多台）。
-///
-/// 每台一个线程，由 [`Slot`] 保证同设备不并行、总路数不超过上限；
-/// 起不来的进队列，[`drain_pending`] 会接着发。
 pub fn send_many(
     targets: Vec<PeerInfo>,
     paths: Vec<PathBuf>,
@@ -256,8 +244,6 @@ pub fn send_many(
 mod tests {
     use super::*;
 
-    /// 三个用例都在动全局槽位表，而 `cargo test` 默认多线程跑：
-    /// 不串行的话 `active_count()` 会被另一个用例的占位污染（偶发失败）。
     static SLOT_LOCK: Mutex<()> = Mutex::new(());
 
     fn lock_slots() -> std::sync::MutexGuard<'static, ()> {
@@ -266,11 +252,13 @@ mod tests {
 
     fn peer(name: &str, host: &str) -> PeerInfo {
         PeerInfo {
+            id: String::new(),
             name: name.to_string(),
             host: host.to_string(),
             port: 1,
             kind: "phone".to_string(),
             seen: std::time::Instant::now(),
+            gap: std::time::Duration::ZERO,
             accepts: true,
         }
     }

@@ -1,5 +1,3 @@
-//! TCP 帧通道：带缓冲的读写、超时，以及 Windows 上的 keepalive 与 socket 缓冲调优。
-
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};

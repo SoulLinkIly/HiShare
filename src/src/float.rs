@@ -1,5 +1,3 @@
-//! 浮窗几何：贴边吸附、拖拽越界保护、位置持久化。
-
 #![cfg(windows)]
 
 use std::path::PathBuf;
@@ -61,8 +59,9 @@ struct DragState {
     grab_y: i32,
     w: i32,
     h: i32,
-    x: i32,
-    y: i32,
+    x0: i32,
+    y0: i32,
+    moved: bool,
     edge: Edge,
 }
 
@@ -164,8 +163,9 @@ pub fn drag_start(mouse: (i32, i32), pos: (i32, i32), size: (i32, i32)) {
             grab_y: mouse.1 - pos.1,
             w: size.0,
             h: size.1,
-            x: pos.0,
-            y: pos.1,
+            x0: pos.0,
+            y0: pos.1,
+            moved: false,
             edge: Edge::None,
         });
     }
@@ -189,8 +189,9 @@ pub fn drag_update(mouse: (i32, i32)) -> Option<(i32, i32, Edge)> {
     };
 
     let (x, y) = keep_other_axis(edge, x, y, state.w, state.h, area);
-    state.x = x;
-    state.y = y;
+    if (x, y) != (state.x0, state.y0) {
+        state.moved = true;
+    }
     state.edge = edge;
     Some((x, y, edge))
 }
@@ -233,16 +234,14 @@ fn axis(want: i32, size: i32, lo: i32, hi: i32, near: Edge, far: Edge) -> (i32, 
     (want, Edge::None, 0)
 }
 
-pub fn drag_end() -> Edge {
-    let edge = DRAG
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().map(|s| s.edge))
-        .unwrap_or(Edge::None);
-    if let Ok(mut slot) = DRAG.lock() {
-        *slot = None;
+pub fn drag_end() -> Option<Edge> {
+    let mut slot = DRAG.lock().unwrap_or_else(|e| e.into_inner());
+    let state = slot.take()?;
+    if state.moved {
+        Some(state.edge)
+    } else {
+        None
     }
-    edge
 }
 
 pub fn tucked_pos(edge: Edge, x: i32, y: i32, w: i32, h: i32, peek: i32) -> (i32, i32) {
@@ -341,6 +340,24 @@ mod tests {
         assert_eq!((y, edge), (PEEK - 300, Edge::Top));
         let (y, edge, _) = axis(9999, 300, 0, 1600, Edge::Top, Edge::Bottom);
         assert_eq!((y, edge), (1600 - PEEK, Edge::Bottom));
+    }
+
+    #[test]
+    fn drag_without_moving_is_not_a_drag() {
+        drag_start((0, 0), (0, 0), (344, 108));
+        assert!(is_dragging());
+        assert_eq!(drag_end(), None, "只按下、没挪窗口，不能当成拖动");
+        assert!(!is_dragging());
+
+        drag_start((0, 0), (0, 0), (344, 108));
+        let (_, _, edge) = drag_update((999_999, 0)).unwrap();
+        assert_eq!(edge, Edge::Right);
+        assert_eq!(drag_end(), Some(Edge::Right), "真拖过就报它落到的边");
+        assert!(!is_dragging());
+
+        drag_start((0, 0), (0, 0), (344, 108));
+        assert_eq!(drag_update((0, 0)), Some((0, 0, Edge::None)));
+        assert_eq!(drag_end(), None, "原地抖一下不算拖动");
     }
 
     #[test]

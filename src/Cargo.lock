@@ -171,7 +171,7 @@ dependencies = [
 
 [[package]]
 name = "hishare"
-version = "1.8.0"
+version = "1.8.6"
 dependencies = [
  "aes",
  "aes-gcm",

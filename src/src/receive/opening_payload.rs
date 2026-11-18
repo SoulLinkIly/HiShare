@@ -1,5 +1,3 @@
-//! 处理 opening：建链握手与 opening ACK，并解析 offer 里的文件数、目录数、总大小。
-
 use super::*;
 use std::time::Duration;
 

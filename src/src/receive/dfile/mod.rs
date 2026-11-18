@@ -1,9 +1,3 @@
-//! 接收侧数据帧：解密、落盘、空文件与空目录处理。
-//!
-//! 拆成三块：`wire` 是纯函数（按协议拼应答帧、打诊断）；`cleanup` 管
-//! 「失败也要把现场收拾干净」——未完成文件、空文件、浮窗守卫；本文件只剩
-//! 那个必须整体读才看得懂的三路轮询状态机。
-
 pub(super) mod cleanup;
 pub(super) mod wire;
 
@@ -25,20 +19,9 @@ mod ov {
 
 const MB: f64 = 1048576.0;
 
-/// 接收一个 dfile 会话：回执 → 三路轮询 → 落盘。
-///
-/// 协议把一次传输拆成三条 TCP 通道，各有分工，必须同时轮询（任何一条堵住都会拖死另两条）：
-///
-/// | 通道 | 作用 |
-/// |---|---|
-/// | `control` | 首帧回执、通道握手应答、取消与控制命令 |
-/// | `byte` | 预览载荷（图片缩略图等）、接收端主动上报的进度帧 |
-/// | `file#1` | 文件清单、真正的数据块、收尾 ACK |
-///
-/// 这是一个显式状态机，状态却都放在局部变量里（`settings_seen` / `header_seen` /
-/// `active_file` / `done_sent` ……），靠主循环每轮重新判断该做什么。改之前先看清
-/// 某个变量在哪些段落被读写——它们之间有隐含顺序（例如没有 `header_seen` 就不该有
-/// `active_file`）。各段边界在下面用 `──` 标出。
+const DONE_ACK_GRACE: Duration = Duration::from_millis(600);
+
+const DONE_DRAIN: Duration = Duration::from_millis(200);
 
 pub(super) fn run_session_once(
     session: &Session,
@@ -50,7 +33,7 @@ pub(super) fn run_session_once(
 ) -> Result<ReceiveResult> {
     let key = session.session_key;
     let sess_t0 = Instant::now();
-    // 接收侧只有对端地址；能从发现表反查到设备名就显示设备名，否则显示地址。
+
     let target = crate::peers::name_for_host(&session.peer)
         .unwrap_or_else(|| session.peer.clone());
     crate::progress::set_target(&target);
@@ -114,7 +97,9 @@ pub(super) fn run_session_once(
 
     let mut byte_errors: u32 = 0;
 
-    let mut eco_byte_last = Instant::now() - Duration::from_secs(2);
+    let mut eco_byte_last = Instant::now()
+        .checked_sub(Duration::from_secs(2))
+        .unwrap_or_else(Instant::now);
     let mut eco_byte_seq: u32 = 1;
     let mut eco_byte_err = false;
 
@@ -136,10 +121,10 @@ pub(super) fn run_session_once(
     let mut current_declared: u64 = 0;
     let mut current_name = String::new();
     let mut done_sent = false;
+    let mut done_at: Option<Instant> = None;
     let mut done_acked = false;
     let mut saved: Vec<PathBuf> = Vec::new();
-    // 已完成的条目数（落盘文件 + 剪贴板文本）。`saved` 只装真文件，剪贴板那条
-    // 永远进不来，所以「收完没有」不能再看 `saved.len()`，否则会话会等到超时。
+
     let mut done_count: usize = 0;
     let mut clip_info: Option<ClipInfo> = None;
 
@@ -161,12 +146,9 @@ pub(super) fn run_session_once(
     let mut last_status = Instant::now();
 
     clear_recv_cancel();
-    // ══ 主循环 ══════════════════════════════════════════════════════
-    // 三路通道并行推进：control 管命令、byte 管预览/对端进度、file#1 管清单与数据。
-    // 每轮顺序固定：先看「该不该退」，再收数据，最后处理控制帧。
+
     while Instant::now() < deadline {
 
-        // ── 取消请求：回 receiverCancel 再退出 ─────────────────────
         if recv_cancel_requested() {
             let tag = RECV_CANCEL_TAG;
             let payload = tlv_encode(tag, b"receiverCancel")
@@ -201,7 +183,6 @@ pub(super) fn run_session_once(
             );
         }
 
-        // ── 收尾判定：清单里的都落了盘、对端也 ACK 了就直接退 ──────
         if done_acked && !pending_more && !expected_files.is_empty()
             && done_count - base_done >= expected_files.len() {
             if debug { eprintln!("[dfile] 全部完成，退出轮询"); }
@@ -226,7 +207,6 @@ pub(super) fn run_session_once(
         }
         let idle = last_progress.elapsed();
 
-        // ── 空闲与超时：先警告一次，再判中断 ───────────────────────
         if idle >= idle_limit() / 3 && !idle_warned {
             idle_warned = true;
             eprintln!(
@@ -259,9 +239,7 @@ pub(super) fn run_session_once(
                     total_received as f64 / MB
                 ),
             );
-            // 对方主动关通道（eof）和我们自己等不到数据是两回事：
-            // 前者是「它发完了 / 它走了」，后者才像「卡住了」。
-            // 以前这句更准的话算完就 `let _ =` 丢掉，用户永远只看到笼统的「可能已锁屏」。
+
             let peer_closed = file_state == "eof" || byte_state == "eof";
             return Err(Error::Protocol(if peer_closed {
                 format!(
@@ -276,7 +254,6 @@ pub(super) fn run_session_once(
             }));
         }
 
-        // ── 接入对端后来才连上的 byte / file 通道 ───────────────────
         if byte_channel.is_none() {
             if let Some(listener) = byte_listener.as_ref() {
                 if let Some(mut chan) = listener.try_accept() {
@@ -300,7 +277,6 @@ pub(super) fn run_session_once(
             }
         }
 
-        // ── 文件通道：清单帧、数据帧、文件收尾 ─────────────────────
         if let (Some(chan), Some(fkey)) = (file_channel.as_mut(), file_key) {
 
             macro_rules! finish_tx {
@@ -313,6 +289,7 @@ pub(super) fn run_session_once(
                     let done = transfer::assemble_dfile_packet(6, 0, 0, tr, &payload)?;
                     chan.transmit(&transfer::dfile_seal_control(&fkey, &done)?)?;
                     done_sent = true;
+                    done_at = Some(Instant::now());
 
                     let more = if total_expected == 0 {
                         session.total_bytes > 0 && total_received < session.total_bytes
@@ -327,6 +304,7 @@ pub(super) fn run_session_once(
                         header_seen = false;
                         transaction = None;
                         done_sent = false;
+                        done_at = None;
                         done_acked = false;
                         base_done = done_count;
 
@@ -457,6 +435,7 @@ pub(super) fn run_session_once(
                         pending_more = false;
                         done_acked = false;
                         done_sent = false;
+                        done_at = None;
                         base_done = done_count;
                         merge_manifest(&mut expected_files, &mut empty_files, data);
                         if expected_files.is_empty() && empty_files.is_empty() {
@@ -587,9 +566,6 @@ pub(super) fn run_session_once(
                                 ov::start(&current_name);
                             }
 
-                            // 打开写入目标：普通文件落盘，`Huawei Share.txt` 只留在内存。
-                            // `part` 为空就是「没有临时文件」，别往 PartGuard 里登记——
-                            // 否则 Drop 时会去删一个不存在的路径。
                             let slot = ActiveFile::open(
                                 destination,
                                 &current_name,
@@ -639,8 +615,7 @@ pub(super) fn run_session_once(
                                     current_name
                                 )));
                             }
-                            // 收尾分两种归宿：落盘的进 `saved`，剪贴板文本进 `clip_info`。
-                            // 两者都算「完成」，所以统一走 `done_count`。
+
                             let finished = match active_file.take() {
                                 Some(slot) => {
                                     part_guard.clear();
@@ -747,7 +722,7 @@ pub(super) fn run_session_once(
         }
 
         let mut byte_broken = false;
-        // ── 字节通道：预览载荷与对端回报的进度 ─────────────────────
+
         if let Some(chan) = byte_channel.as_mut() {
 
             if preview_acked {
@@ -906,7 +881,6 @@ pub(super) fn run_session_once(
             break;
         }
 
-        // ── 控制通道：取消、设置、收尾命令 ─────────────────────────
         let ctl_frame = match control.try_read_frame(POLL) {
             Ok(f) => f,
             Err(e) => {
@@ -1366,7 +1340,11 @@ pub(super) fn run_session_once(
 
         if !pending_more && done_count > 0
             && done_count - base_done >= expected_files.len().max(1) && active.is_none() {
-            break;
+            let settled = done_acked
+                || done_at.map_or(true, |t| t.elapsed() >= DONE_ACK_GRACE);
+            if settled {
+                break;
+            }
         }
     }
 
@@ -1388,6 +1366,15 @@ pub(super) fn run_session_once(
             total_received as f64 / MB
         )));
     }
+
+    let drain = if done_acked { DONE_DRAIN } else { DONE_ACK_GRACE };
+    if let Some(mut chan) = file_channel.take() {
+        chan.graceful_close(drain);
+    }
+    if let Some(mut chan) = byte_channel.take() {
+        chan.graceful_close(DONE_DRAIN);
+    }
+    control.graceful_close(drain);
 
     ov::finish();
     oguard.done = true;

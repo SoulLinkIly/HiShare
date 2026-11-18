@@ -1,17 +1,21 @@
-HiShare 1.8.0 · 成品校验
+HiShare 1.8.6 · 成品校验
 
-版本：1.8.0（首个对外发布版本）
-构建：2026-11-08，`src\build.ps1`（Rust stable x86_64-pc-windows-gnu，release，panic=abort，strip）
-验证：cargo test = 202 单元 + 6 回环，release 零警告
+版本：1.8.6
+构建：2026-11-18，`src\build.ps1`（Rust stable x86_64-pc-windows-gnu，release，panic=abort，strip）
+验证：cargo test = 237 单元 + 6 回环，二进制收发回环 SHA-256 一致，release 零警告
 许可：PolyForm Noncommercial 1.0.0（个人免费，商业需授权）
-版本资源：FileVersion / ProductVersion = 1.8.0；CompanyName = LCH；ProductName = HiShare
+版本资源：FileVersion / ProductVersion = 1.8.6；CompanyName = LCH；ProductName = HiShare
 
 文件                    字节数      SHA-256
-hishare.exe             1221120   5eebfe35e2f4fcf908af5df42a0002fd470cbe56f8b9058600cba707a6962553
-hishare-cli.exe         1190912   75cfb7c9f08e355c7a454f88845c3f5480d7a6f0c049f235e5f0b3694724ac2a
+hishare.exe             1223168   893ad4a5a32058a0b2d102c693834075af7d4c1eea8693a54c35bdba1b81166b
+hishare-cli.exe         1190400   bf1020e7693f37a6f725abd5ad267e25f628484145e141a480c609c1fffc14d0
 
 注意：手敲 cargo build 不会跑 build.rs 里的 windres 步骤，产物没有图标/版本资源，
       大小与上面不同属正常。发版请用 build.ps1。
+
+      二进制里不含构建机的绝对路径：build.ps1 会用 --remap-path-prefix 把
+      依赖目录、target 目录、用户目录改写成 /rust/cargo、/target、/user 这类
+      固定前缀，所以换目录、换用户名重建都能得到上面这串哈希。
 
 核对方法（PowerShell）：
     Get-FileHash .\bin\hishare.exe -Algorithm SHA256
@@ -20,4 +24,8 @@ hishare-cli.exe         1190912   75cfb7c9f08e355c7a454f88845c3f5480d7a6f0c049f2
 目录：
   bin\      成品（hishare.exe 托盘程序、hishare-cli.exe 命令行）
   src\      全部源码 + Cargo.toml/lock + build.ps1 + build.rs + assets\ + tests\
+            源码不带注释（构建脚本的用法注释除外）；开发笔记与抓包样本不随发布包提供
   README.md / 版本说明.md / 使用说明.md / LICENSE / NOTICE.md / 构建.bat
+
+以上即发布包全部内容：根目录 7 个文件 + bin\ 两个 exe + src\，没有别的目录。
+用 src\build.ps1 可自行重建；手敲 cargo build 会丢图标与版本资源。

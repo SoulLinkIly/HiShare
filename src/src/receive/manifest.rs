@@ -1,5 +1,3 @@
-//! 合并对端发来的清单（重传时会分片到达），并回 ack。
-
 use crate::channel::Channel;
 use crate::transfer::{self};
 use crate::Result;

@@ -1,7 +1,3 @@
-//! 接收侧要回给对端的帧，以及协议诊断输出。
-//!
-//! 全是纯函数：给参数就拼字节，不读全局状态、不碰磁盘，改协议时只看这一处。
-
 use super::*;
 
 pub(super) fn take_chars(text: &str, n: usize) -> String {
@@ -168,7 +164,7 @@ pub(super) fn build_byte_handshake_ack(peer_apple: bool, pkg: &str, node: &str) 
 
 pub(super) fn build_meta_info_json(display_name: &str, device_hash: &[u8]) -> String {
     let node = crate::hex_lower(&crate::sha256(device_hash));
-    let device_type = crate::outbound::DEVICE_TYPE_ID;   // u32 = 12
+    let device_type = crate::outbound::DEVICE_TYPE_ID;
     format!(
         r#"{{"DEVICE_NAME":"{display_name}","DEVICE_TYPE_ID":{device_type},"FLAG":100,"META_AUTH_CAPA":1,"META_NODE_ID":"{node}","TOKEN_ID":"0000000000000000000000000000000000000000000000000000000000000001"}}"#
     )

@@ -1,5 +1,3 @@
-//! 接收确认框：30 秒超时，返回是否接收与等待期间从对端读到的数据。
-
 use crate::ui::font::{WEIGHT_BOLD, WEIGHT_NORMAL};
 use std::io::Read;
 use std::net::TcpStream;
@@ -80,7 +78,6 @@ fn reason_text(code: i32) -> &'static str {
 
 const DRAIN_MAX: usize = 64 * 1024;
 
-/// 对端连接的三种可见状态。`Reset` 一律关窗，`Eof` 是否关窗受 `HISHARE_CONFIRM_EOF_CLOSE` 控制。
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Peer {
     Alive,
@@ -323,6 +320,11 @@ pub fn ask(
     if !crate::env::unless_zero("HISHARE_CONFIRM") {
         crate::trace::confirm_show(peer, count, bytes);
         crate::trace::confirm_answer(peer, true, "HISHARE_CONFIRM=0 自动接收");
+        return Answer::plain(true);
+    }
+    if crate::config::auto_accept() {
+        crate::trace::confirm_show(peer, count, bytes);
+        crate::trace::confirm_answer(peer, true, "config.json auto_accept 自动接收");
         return Answer::plain(true);
     }
     crate::trace::confirm_show(peer, count, bytes);

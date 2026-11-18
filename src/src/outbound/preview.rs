@@ -1,5 +1,3 @@
-//! 发送前的 net_info 应答、预览载荷与本地时间格式化。
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 

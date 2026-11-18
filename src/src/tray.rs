@@ -1,5 +1,3 @@
-//! 托盘图标与消息循环：菜单命令分发、气泡、通知队列。
-
 #![cfg(windows)]
 
 use crate::ui::text::wide;
@@ -26,12 +24,8 @@ pub use dialogs::{open_or_pick_dest, send_clipboard_now};
 const WM_APP: u32 = 0x8000;
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_NOTICE: u32 = WM_APP + 2;
-/// 「又有人启动了一个」：由后启动的那个进程投递给这里，让**活着的**这个去弹提示。
-///
-/// 后启动的进程拿不到互斥量就得立刻退出，自己弹的窗口会被进程退出一起带走——
-/// 屏幕上什么也留不下，用户只知道「双击了但没反应」。所以提示交给已经在跑的这个来弹。
-const WM_DUP_START: u32 = WM_APP + 3;
 
+const WM_DUP_START: u32 = WM_APP + 3;
 
 const TRAY_UID: u32 = 1;
 
@@ -41,7 +35,6 @@ static ICON_SLOT: AtomicIsize = AtomicIsize::new(0);
 static CONTEXT: Mutex<Option<Context>> = Mutex::new(None);
 static NOTICES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
-/// 同一时刻只放一条通知窗，后来的直接丢。
 static ALERT_BUSY: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
@@ -113,8 +106,7 @@ pub fn set_dest(dest: &str) {
 }
 
 pub fn notify(title: &str, body: &str) {
-    // 优先走自绘的右下角提示：系统气泡会被专注助手整条吞掉，样式也不受控。
-    // 起不来（建窗失败 / 非 Windows / `HISHARE_TOAST=0`）时才回落到气泡。
+
     if crate::toast::push(title, body) {
         return;
     }
@@ -215,9 +207,16 @@ pub fn refresh_tooltip() {
         return;
     }
     let ctx = context_text();
-    let targets = crate::peers::targets();
+    let targets = crate::peers::selected();
+    let offline = crate::peers::wanted().len().saturating_sub(targets.len());
     let target = if targets.is_empty() {
-        "未选发送目标".to_string()
+        if offline > 0 {
+            format!("未选发送目标（{offline} 台离线）")
+        } else {
+            "未选发送目标".to_string()
+        }
+    } else if offline > 0 {
+        format!("{}（{offline} 台离线）", target_summary(&targets, "发送给 "))
     } else {
         target_summary(&targets, "发送给 ")
     };
@@ -258,7 +257,7 @@ pub fn enable_dpi_awareness() {
 }
 
 pub fn run_loop() -> i32 {
-    // GUI 进程的事件出口：库里的日志写进托盘日志，文本进度条不画（进度由浮窗显示）。
+
     crate::report::install(log_line, |_| {}, || {});
 
     unsafe {
@@ -350,7 +349,7 @@ pub fn run_loop() -> i32 {
             "托盘图标已挂载（退化为系统默认图标）"
         });
 
-        let _ = crate::peers::view(crate::peers::LIST_TTL);
+        let _ = crate::peers::view();
         refresh_tooltip();
         crate::dropzone::show();
 
@@ -392,8 +391,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             0
         }
         WM_DUP_START => {
-            // 有人又双击了一次 exe。他要的信息只有两条：程序在跑、窗口在哪。
-            // 顺手把投递窗叫回来——「我双击了怎么没反应」通常就是面板被收进托盘了。
+
             crate::dropzone::show();
             refresh_tooltip();
             log_line("[启动] 又开了一次，已提示「已在运行」并叫回投递窗");
@@ -419,16 +417,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
-/// 主菜单命令的统一下发点。
-///
-/// 菜单用 `TPM_RETURNCMD` 自己取返回值（这样「发送目标」才能做成原地重开的多选弹窗），
-/// 所以命令不一定经过 `WM_COMMAND`；两条路径都收敛到这里，逻辑只写一遍。
 fn run_command(hwnd: HWND, id: usize) {
     unsafe {
         match id {
             ID_OPEN => open_folder(&context_text().dest),
             ID_PICK_DIR => choose_dir(hwnd),
             ID_AUTOSTART => toggle_autostart(hwnd),
+            ID_AUTO_ACCEPT => toggle_auto_accept(hwnd),
             ID_HISTORY_FILE => {
                 let path = crate::history::log_file();
                 if path.exists() {
@@ -454,12 +449,17 @@ fn run_command(hwnd: HWND, id: usize) {
                 }
             }
             ID_TARGET_RESCAN => {
+
+                let devices = crate::peers::prune_offline();
                 crate::discovery::request_scan();
-                log_line("[目标] 手动重新扫描");
-                notify(
-                    "正在扫描",
-                    "设备会在一两秒内出现在「发送目标」里（手机需亮屏、开着分享）",
-                );
+                log_line(&format!("[目标] 重新扫描：清除 {devices} 台离线设备"));
+                let body = if devices == 0 {
+                    "所有设备都在线，没有要清的".to_string()
+                } else {
+                    format!("已清除 {devices} 台离线设备；正在重新广播，1~2 秒后刷新菜单。已选的发送目标不受影响")
+                };
+                notify("正在扫描", &body);
+                refresh_tooltip();
             }
             ID_TARGET_CLEAR => {
                 crate::peers::clear_targets();
@@ -495,21 +495,15 @@ fn peer_at(index: usize) -> Option<crate::peers::PeerInfo> {
         .and_then(|slot| slot.get(index).cloned())
 }
 
-/// 弹一条通知。
-///
-/// **不阻塞调用方**：过去这里直接跑 `notice::show`，而它内部是 `GetMessageW` 模态循环，
-/// 于是从浮窗线程调用时会把进度绘制和定时器一起冻住（更糟的情况是从接收线程调用，
-/// 连接收都会停）。现在丢到独立线程去弹，调用方立刻返回。
 pub fn alert(title: &str, body: &str) {
     if ALERT_BUSY.swap(true, Ordering::SeqCst) {
-        // 已经有一条在显示：丢掉后来的，别让错误处理把屏幕铺满。
+
         return;
     }
     let title = title.to_string();
     let body = body.to_string();
     std::thread::spawn(move || {
-        // notice::show 里有 GDI 调用，异常路径下 panic 并非不可能；
-        // 一旦 panic 而没复位 ALERT_BUSY，之后所有通知都会被当成"已有一条"丢掉。
+
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crate::notice::show(&title, &body);
         }));
@@ -517,20 +511,12 @@ pub fn alert(title: &str, body: &str) {
     });
 }
 
-/// `alert` 的同步版：调用线程一直卡到用户点「好」为止。
-///
-/// 只给「马上就要 `exit`」的启动路径用。`alert` 是丢线程去弹的，而进程一退出所有线程
-/// 都被硬杀，那张卡还没来得及画出来就没了——正是「重复启动毫无提示」的成因。
 pub fn alert_blocking(title: &str, body: &str) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::notice::show(title, body);
     }));
 }
 
-/// 叫醒已经在运行的那个实例，让它弹提示并把投递窗叫回来。
-///
-/// 按类名找窗：`FindWindowW` 只在同一会话/同一桌面的顶层窗口里找，正好是本进程要的
-/// 那个。找不到就返回 `false`（对方可能刚拿到互斥量、窗口还没建出来），调用方自己兜底。
 pub fn poke_running_instance() -> bool {
     unsafe {
         let class = wide("HiShareTrayWindow");
@@ -561,11 +547,13 @@ mod menu_text_tests {
 
     fn peer(name: &str, kind: &str, age: Duration) -> PeerInfo {
         PeerInfo {
+            id: String::new(),
             name: name.to_string(),
             host: "192.168.1.9".to_string(),
             port: 1234,
             kind: kind.to_string(),
-            seen: Instant::now() - age,
+            seen: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
+            gap: Duration::ZERO,
             accepts: true,
         }
     }
@@ -579,11 +567,12 @@ mod menu_text_tests {
     }
 
     #[test]
-    fn closed_peer_shows_hint_without_dot() {
+    fn share_off_peer_is_offline_without_dot() {
         let mut p = peer("nova 14 Ultra", "phone", Duration::from_secs(5));
         p.accepts = false;
         let line = peer_line(&p);
-        assert!(line.contains("对方关了华为分享"), "{line}");
+        assert!(line.contains("离线"), "{line}");
+        assert!(!line.contains("关了"), "不再单独提示「关了分享」，统一算离线：{line}");
         assert!(line.contains("手机"), "{line}");
         assert!(!line.contains('●') && !line.contains('○'), "{line}");
     }
@@ -654,7 +643,6 @@ mod menu_text_tests {
         out
     }
 
-    /// 按文字找菜单项（含子菜单），返回它的状态位（`MF_CHECKED` / `MF_GRAYED` …）。
     unsafe fn item_state(menu: HMENU, needle: &str) -> Option<u32> {
         for index in 0..GetMenuItemCount(menu).max(0) {
             let mut buf = [0u16; 256];
@@ -686,8 +674,8 @@ mod menu_text_tests {
             .unwrap_or_else(|e| e.into_inner());
         crate::peers::reset_for_test();
 
-        crate::peers::upsert("测试机甲", "10.77.0.1", 4321, "phone", true);
-        crate::peers::upsert("测试平板乙", "10.77.0.2", 4322, "tablet", true);
+        crate::peers::upsert("", "测试机甲", "10.77.0.1", 4321, "phone", true);
+        crate::peers::upsert("", "测试平板乙", "10.77.0.2", 4322, "tablet", true);
 
         unsafe {
             let menu = build_menu();
@@ -754,19 +742,13 @@ mod menu_text_tests {
             .unwrap_or_else(|e| e.into_inner());
         crate::peers::reset_for_test();
 
-        crate::peers::upsert("在线甲", "10.78.0.1", 4001, "phone", true);
-        crate::peers::upsert("在线乙", "10.78.0.2", 4002, "tablet", true);
-        crate::peers::upsert_aged("熄屏丙", "10.78.0.3", 4003, "phone", Duration::from_secs(30));
-        // 超过 5 分钟没消息：连列表都不该进。
-        crate::peers::upsert_aged(
-            "很久以前",
-            "10.78.0.4",
-            4004,
-            "phone",
-            crate::peers::LIST_TTL + Duration::from_secs(1),
-        );
+        crate::peers::upsert("", "在线甲", "10.78.0.1", 4001, "phone", true);
+        crate::peers::upsert("", "在线乙", "10.78.0.2", 4002, "tablet", true);
+        crate::peers::upsert_aged("", "熄屏丙", "10.78.0.3", 4003, "phone", Duration::from_secs(30));
 
-        let picked = crate::peers::snapshot(crate::peers::LIST_TTL)
+        crate::peers::upsert_aged("", "很久以前", "10.78.0.4", 4004, "phone", Duration::from_secs(3600));
+
+        let picked = crate::peers::snapshot()
             .into_iter()
             .find(|p| p.host == "10.78.0.1")
             .expect("在线甲 应该在表里");
@@ -778,7 +760,7 @@ mod menu_text_tests {
             let labels = menu_labels(menu);
             let checked = item_state(menu, "在线甲（手机）");
             let offline = item_state(menu, "熄屏丙（手机");
-            let gone = item_state(menu, "很久以前");
+            let old = item_state(menu, "很久以前");
             let single = item_state(menu, "在线乙（平板）");
             DestroyMenu(menu);
 
@@ -793,14 +775,30 @@ mod menu_text_tests {
                 offline.expect("熄屏丙 不见了") & MF_GRAYED != 0,
                 "离线的必须灰掉：{text}"
             );
-            assert!(text.contains("熄屏丙") && text.contains("离线"), "{text}");
-            assert!(gone.is_none(), "超过 5 分钟的设备要从菜单里消失：{text}");
+            assert!(
+                old.expect("离线设备不该从菜单消失") & MF_GRAYED != 0,
+                "离线一小时也只是灰着，不许消失：{text}"
+            );
             assert!(text.contains("重新扫描局域网"), "{text}");
             assert!(text.contains("清除选择"), "已经勾了设备，要给清除入口：{text}");
         }
 
-        // 勾第二台：两台都打勾，标题变成「等 2 台」。
-        let second = crate::peers::snapshot(crate::peers::LIST_TTL)
+        crate::peers::upsert_aged("", "在线甲", "10.78.0.1", 4001, "phone", Duration::from_secs(30));
+        unsafe {
+            let menu = build_menu();
+            let labels = menu_labels(menu);
+            let state = item_state(menu, "在线甲（手机");
+            DestroyMenu(menu);
+            let text = labels.join(" | ");
+            let state = state.expect("在线甲 还在列表里");
+            assert!(state & MF_CHECKED == 0, "离线即掉勾：{text}");
+            assert!(state & MF_GRAYED != 0, "离线即灰：{text}");
+            assert!(text.contains("发送目标：未选择"), "{text}");
+            assert!(text.contains("1 台离线"), "离线台数要在标题上：{text}");
+            assert!(text.contains("清除选择"), "全离线时也得能清：{text}");
+        }
+
+        let second = crate::peers::snapshot()
             .into_iter()
             .find(|p| p.host == "10.78.0.2")
             .expect("在线乙 应该在表里");
@@ -811,7 +809,8 @@ mod menu_text_tests {
             let labels = menu_labels(menu);
             DestroyMenu(menu);
             let text = labels.join(" | ");
-            assert!(text.contains("等 2 台"), "多选后标题要报总数：{text}");
+            assert!(text.contains("在线乙"), "{text}");
+            assert!(text.contains("1 台离线"), "{text}");
         }
         crate::peers::reset_for_test();
     }

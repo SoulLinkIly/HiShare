@@ -1,5 +1,3 @@
-//! 二进制 trace 落盘（`HISHARE_TRACE` 开关），用于抓包复核。
-
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -13,11 +11,7 @@ use serde_json::{json, Map, Value};
 pub const FORMAT_VERSION: u64 = 1;
 
 thread_local! {
-    /// 当前线程正在处理的会话 id。
-    ///
-    /// 以前 sid 是**进程级**一个，几路并发时所有 `session.start` / `channel.*` 的 sid 完全相同，
-    /// 事后按 sid 归并会把 A 的 start 和 B 的 end 配成一对（复盘时出现过
-    /// "声明 377 MB / 实收 19 MB" 的假警报）。现在改成一会话一个 id。
+
     static SESSION_SID: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
@@ -288,7 +282,6 @@ pub fn finish(reason: &str) {
     *guard = None;
 }
 
-/// 会话线程用本线程的 id，主线程（capture.meta / capture.end）退回进程级 id。
 fn current_sid(fallback: &str) -> String {
     SESSION_SID.with(|s| {
         let v = s.borrow();
@@ -401,7 +394,7 @@ pub fn session_start(mode: &str, peer: &str, local: &str, files: usize, bytes: u
     if !enabled() {
         return;
     }
-    // 每个会话线程拿一个独立 id，并发时才能按 sid 分开。
+
     SESSION_SID.with(|s| *s.borrow_mut() = make_session_id());
     let mut f = obj();
     push(&mut f, "dir", json!(mode));
@@ -788,7 +781,7 @@ mod tests {
         let all = lines(&path);
         let count = |ev: &str| all.iter().filter(|v| v["ev"] == ev).count();
         assert_eq!(count("discovery.build"), 1);
-        assert_eq!(count("discovery.tx"), 2, "broadcast + 目标单播；其它设备的不记");
+        assert_eq!(count("discovery.tx"), 2, "目标单播 + 无目标归属的事件；其它设备的不记");
         assert_eq!(count("discovery.rx.raw"), 1, "只留目标 IP 的 UDP");
         assert_eq!(count("channel.fail"), 1);
         assert_eq!(count("frame.partial"), 1);

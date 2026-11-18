@@ -1,14 +1,5 @@
-//! 收尾清理：空文件补建、未完成文件删除、浮窗守卫。
-//!
-//! 这些事的共同点是「成功失败都得做」，所以用 `Drop` 兜住，
-//! 而不是在每个 `return Err` 前面手写一遍。
-
 use super::*;
 
-/// 把清单里声明为 0 字节的文件逐个「建出来」。
-///
-/// 协议里 0 字节文件不走数据通道，只能在收尾时按名字创建。
-/// 单个失败只记 trace、不打断整批——一个空文件失败不该让其余文件作废。
 pub(super) fn materialize_empty_files(
     destination: &Path,
     pending: &mut Vec<(u16, String)>,
@@ -21,8 +12,7 @@ pub(super) fn materialize_empty_files(
         if name.trim().is_empty() {
             continue;
         }
-        // 0 字节的剪贴板文本：不建文件，也不去覆盖用户的剪贴板（空内容没有
-        // 价值），但这条必须计入完成数——否则会话会一直等这个「没收完」的条目。
+
         if clip::is_target(&name) {
             *clip_info = Some(clip::deliver(&[], false, 0));
             if !done_ids.contains(&empty_id) {

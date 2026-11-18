@@ -1,6 +1,3 @@
-//! 华为账号链路的信封编解码（module 9、magic 1、version 101）。
-//! 手机在接收前会走一遍这个认证，字段用 varint 排在一段固定前缀之后。
-
 use rand::RngCore;
 use rsa::RsaPrivateKey;
 

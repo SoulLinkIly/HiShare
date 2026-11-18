@@ -1,11 +1,3 @@
-//! 托盘右键菜单：构建菜单、设备行的文字、以及「开机自启动」「关于」这两项。
-//!
-//! 从 `tray.rs` 拆出来，避免一个文件里同时塞着图标、菜单、对话框和剪贴板四件事。
-//!
-//! 「发送目标」是二级菜单，里面每台设备一个勾选项，**可以同时勾多台**。
-//! 注意 Windows 菜单点一下就整体关闭，所以勾完一台菜单会收起，再右键打开勾下一台；
-//! 勾选状态会一直保留在 `peers::TARGETS` 里。
-
 use crate::ui::text::wide;
 use std::sync::Mutex;
 use windows_sys::Win32::Foundation::{HWND, POINT};
@@ -19,6 +11,7 @@ pub(super) const ID_PICK_DIR: usize = 1008;
 
 pub(super) const ID_AUTOSTART: usize = 1010;
 pub(super) const ID_HISTORY_FILE: usize = 1011;
+pub(super) const ID_AUTO_ACCEPT: usize = 1012;
 
 pub(super) const ID_SEND_BASE: usize = 1200;
 
@@ -57,12 +50,8 @@ pub(super) fn peer_name(p: &crate::peers::PeerInfo) -> String {
     }
 }
 
-/// 菜单里的一行设备：`名字（手机 · 离线）`。
-///
-/// 离线只写「离线」，不写「N 分钟前」——用户要的是能不能发，
-/// 不是上次见到它是几点；超过 `LIST_TTL` 它自己会从列表里消失。
 pub(super) fn peer_line(p: &crate::peers::PeerInfo) -> String {
-    let online = p.seen.elapsed() <= crate::peers::ONLINE_WINDOW;
+    let online = crate::peers::online(p);
     let kind = kind_text(&p.kind);
     let mut detail: Vec<String> = Vec::new();
     if !kind.is_empty() {
@@ -70,13 +59,8 @@ pub(super) fn peer_line(p: &crate::peers::PeerInfo) -> String {
     }
     if !online {
         detail.push("离线".to_string());
-    } else {
-        if !p.accepts {
-            detail.push("对方关了华为分享".to_string());
-        }
-        if crate::peers::verdict(&p.host) == Some(crate::peers::Verdict::Closed) {
-            detail.push("上次被拒".to_string());
-        }
+    } else if crate::peers::verdict(&p.host) == Some(crate::peers::Verdict::Closed) {
+        detail.push("上次被拒".to_string());
     }
     let line = if detail.is_empty() {
         p.name.clone()
@@ -93,12 +77,11 @@ pub(super) fn menu_text(s: &str) -> String {
         .replace('\r', " ")
 }
 
-/// 「发送目标」那一行的标题，也用在托盘提示里。`prefix` 是「发送目标：」或「发送给 」。
 pub(super) fn target_summary(selected: &[crate::peers::PeerInfo], prefix: &str) -> String {
     match selected {
         [] => format!("{prefix}未选择"),
         [one] => {
-            if one.seen.elapsed() <= crate::peers::ONLINE_WINDOW {
+            if crate::peers::online(one) {
                 format!("{prefix}{}", one.name)
             } else {
                 format!("{prefix}{}（离线）", one.name)
@@ -114,15 +97,16 @@ pub(super) unsafe fn build_menu() -> HMENU {
         return menu;
     }
 
-    let view = crate::peers::view(crate::peers::LIST_TTL);
+    let view = crate::peers::view();
     let peers = view.peers;
     let chosen = view.selected;
+
+    let offline_picks = crate::peers::wanted().len().saturating_sub(chosen.len());
 
     if let Ok(mut slot) = MENU_PEERS.lock() {
         *slot = peers.clone();
     }
 
-    // 「发送目标」二级菜单：每台设备一个勾选项，可以同时勾多台。
     let target_menu = CreatePopupMenu();
     if peers.is_empty() {
         AppendMenuW(
@@ -146,12 +130,11 @@ pub(super) unsafe fn build_menu() -> HMENU {
     } else {
         for (index, peer) in peers.iter().enumerate() {
             let checked = chosen.iter().any(|c| c.host == peer.host);
-            let offline = !crate::peers::is_online(peer);
-            // 离线的勾不上（勾了也发不出去），但已经勾上的要留成可点的，
-            // 否则设备一息屏用户就没法把它从目标里去掉。
+            let offline = !crate::peers::online(peer);
+
             let flags = MF_STRING
                 | if checked { MF_CHECKED } else { 0 }
-                | if offline && !checked { MF_GRAYED } else { 0 };
+                | if offline { MF_GRAYED } else { 0 };
             AppendMenuW(
                 target_menu,
                 flags,
@@ -167,7 +150,8 @@ pub(super) unsafe fn build_menu() -> HMENU {
         ID_TARGET_RESCAN,
         wide("重新扫描局域网").as_ptr(),
     );
-    if !chosen.is_empty() {
+
+    if !crate::peers::wanted().is_empty() {
         AppendMenuW(
             target_menu,
             MF_STRING,
@@ -177,7 +161,10 @@ pub(super) unsafe fn build_menu() -> HMENU {
     }
 
     let mut label = target_summary(&chosen, "发送目标：");
-    // 代选的不是用户选的：菜单上必须说清楚，否则"我没选过它啊"就是事故现场。
+    if offline_picks > 0 {
+        label.push_str(&format!("（{offline_picks} 台离线）"));
+    }
+
     if !chosen.is_empty() && crate::peers::auto_picked() {
         label.push_str("（自动）");
     }
@@ -202,7 +189,7 @@ pub(super) unsafe fn build_menu() -> HMENU {
     } else {
         for (index, peer) in peers.iter().enumerate() {
             let flags = MF_STRING
-                | if crate::peers::is_online(peer) {
+                | if crate::peers::online(peer) {
                     0
                 } else {
                     MF_GRAYED
@@ -233,7 +220,7 @@ pub(super) unsafe fn build_menu() -> HMENU {
     } else {
         for (index, peer) in peers.iter().enumerate() {
             let flags = MF_STRING
-                | if crate::peers::is_online(peer) {
+                | if crate::peers::online(peer) {
                     0
                 } else {
                     MF_GRAYED
@@ -256,6 +243,15 @@ pub(super) unsafe fn build_menu() -> HMENU {
 
     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
 
+    let accept = crate::config::auto_accept();
+    let accept_flags = MF_STRING | if accept { MF_CHECKED } else { 0 };
+    AppendMenuW(
+        menu,
+        accept_flags,
+        ID_AUTO_ACCEPT,
+        wide(&auto_accept_label(accept)).as_ptr(),
+    );
+
     let startup = crate::autostart::status();
     let startup_flags = MF_STRING | if startup.on() { MF_CHECKED } else { 0 };
     AppendMenuW(
@@ -266,7 +262,6 @@ pub(super) unsafe fn build_menu() -> HMENU {
     );
     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
 
-    // 传输记录不在菜单里摊开：一行一条，打开文件自己看（记事本/Excel 都行）。
     AppendMenuW(
         menu,
         MF_STRING,
@@ -303,6 +298,46 @@ pub(super) unsafe fn show_menu(hwnd: HWND) {
 
     if cmd != 0 {
         super::run_command(hwnd, cmd as usize);
+    }
+}
+
+pub(super) fn auto_accept_label(on: bool) -> String {
+    if on {
+        "自动接收文件（同网段免确认）".to_string()
+    } else {
+        "自动接收文件".to_string()
+    }
+}
+
+pub(super) unsafe fn toggle_auto_accept(hwnd: HWND) {
+    let next = !crate::config::auto_accept();
+    match crate::config::set_auto_accept(next) {
+        Ok(()) => {
+            log_line(&format!(
+                "[接收] 自动接收{}",
+                if next { "开启" } else { "关闭" }
+            ));
+            if next {
+                let dest = crate::config::current();
+                notify(
+                    "自动接收已开启",
+                    &format!(
+                        "同网段的任何设备发来的文件都会直接存到\n{}\n不再弹确认框。公共 Wi-Fi 下建议关掉。",
+                        dest.display()
+                    ),
+                );
+            } else {
+                notify("自动接收已关闭", "以后收到文件会重新弹出确认框");
+            }
+        }
+        Err(e) => {
+            log_line(&format!("[接收] 自动接收切换失败：{e}"));
+            message_box(
+                hwnd,
+                &format!("保存自动接收设置失败：\n{e}"),
+                MB_OK | MB_ICONWARNING,
+            );
+        }
     }
 }
 

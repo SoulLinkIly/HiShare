@@ -1,6 +1,3 @@
-//! 剪贴板读写：把剪贴板文本落成临时文件交给发送流程复用，
-//! 以及把接收到的文本直接写回剪贴板。
-
 #![cfg(windows)]
 
 use std::path::PathBuf;
@@ -53,11 +50,6 @@ pub fn read_text() -> Option<String> {
     }
 }
 
-/// 把一段文本写进系统剪贴板（覆盖原有内容）。
-///
-/// 失败只返回原因、不 panic：调用方是接收线程，剪贴板写不进去不该让一次
-/// 已经收完的传输变成失败。剪贴板常被别的程序（剪贴板管理器、远程桌面、
-/// 输入法）短暂占着，`OpenClipboard` 会直接失败，所以这里重试几次再放弃。
 pub fn write_text(text: &str) -> Result<(), String> {
     if text.is_empty() {
         return Err("文本为空".to_string());
@@ -75,8 +67,6 @@ pub fn write_text(text: &str) -> Result<(), String> {
         return Err("剪贴板被其它程序占用".to_string());
     }
 
-    // Windows 剪贴板要的是可移动内存块，且必须是「写完就不归我们管」的
-    // UTF-16 以 NUL 结尾。长度按 u16 算，别用字节数。
     let units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, units.len() * 2) };
     if handle.is_null() {
@@ -97,7 +87,7 @@ pub fn write_text(text: &str) -> Result<(), String> {
         std::ptr::copy_nonoverlapping(units.as_ptr(), pointer, units.len());
         GlobalUnlock(handle);
         EmptyClipboard();
-        // 成功后这块内存归系统所有，不能再 GlobalFree。
+
         if SetClipboardData(CF_UNICODETEXT, handle).is_null() {
             GlobalFree(handle);
             CloseClipboard();

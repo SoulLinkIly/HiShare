@@ -1,5 +1,3 @@
-//! 开机自启：读写 HKCU 的 Run 项，并核对当前 exe 路径。
-
 #![cfg(windows)]
 
 use crate::ui::text::wide;

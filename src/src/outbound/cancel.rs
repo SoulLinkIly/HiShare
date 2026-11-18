@@ -1,5 +1,3 @@
-//! 发送侧取消：发出 cancel 帧，并盯住控制通道等对端确认。
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -9,15 +7,8 @@ use crate::transfer;
 use crate::Error;
 use super::*;
 
-/// 还在跑的所有发送会话的令牌（弱引用，会话结束自动失效）。
-///
-/// 以前这里是一个全局 `AtomicBool`，多路并行时有两个连带问题：
-/// ① 任何一路取消都会把**其它几路**一起停掉；
-/// ② `transmit()` 里那句 `if active()==0 { clear() }` 在多路时永远不成立，
-///    于是这个标志一直挂着，**之后新开的任务一跑就被判"已取消"**。
 static TOKENS: Mutex<Vec<Weak<AtomicBool>>> = Mutex::new(Vec::new());
 
-/// 一次发送会话的取消令牌。`transmit()` 创建，活到会话结束。
 pub struct CancelToken(Arc<AtomicBool>);
 
 impl CancelToken {
@@ -30,7 +21,6 @@ impl CancelToken {
         Self(flag)
     }
 
-    /// 各阶段共享的同一面旗。
     pub fn flag(&self) -> Arc<AtomicBool> {
         self.0.clone()
     }
@@ -46,10 +36,6 @@ fn prune(list: &mut Vec<Weak<AtomicBool>>) {
     list.retain(|w| w.strong_count() > 0);
 }
 
-/// 用户点了「取消」：置位当前**所有**在跑的会话。
-///
-/// 并行时界面上是一个聚合视图，用户按的也是"这一批"，所以不是只停某一路；
-/// 但已经结束的会话不会留在表里，新任务也不会被旧请求命中。
 pub fn request_cancel_send() {
     let Ok(mut list) = TOKENS.lock() else {
         return;
@@ -62,10 +48,6 @@ pub fn request_cancel_send() {
     }
 }
 
-/// 只认本会话的令牌。
-///
-/// 以前这里还要再查一遍全局标志，并 sleep 300 ms 等控制线程把旗子插到自己身上；
-/// 现在 `request_cancel_send` 直接置位每个令牌，不用等传播。
 pub(super) fn cancelled(cancel: &AtomicBool) -> bool {
     cancel.load(Ordering::Relaxed)
 }
@@ -206,7 +188,6 @@ pub(super) fn spawn_control_watch(
         let mut cancel_sent = false;
         while !stop.load(Ordering::Relaxed) {
 
-            // 令牌由 UI 直接置位，这里只负责把 senderCancel 发出去。
             if !cancel_sent && cancel.load(Ordering::Relaxed) {
                 cancel_sent = true;
                 send_sender_cancel(&mut channel, &device_hash, &key, &mut sequence);
@@ -312,7 +293,6 @@ pub(super) fn spawn_control_watch(
 mod tests {
     use super::*;
 
-    /// `TOKENS` 是全局表，用例之间会互相置位，必须串行。
     static SERIAL: Mutex<()> = Mutex::new(());
 
     fn serial() -> std::sync::MutexGuard<'static, ()> {
@@ -336,7 +316,7 @@ mod tests {
             let old = CancelToken::new();
             request_cancel_send();
             assert!(cancelled(&old.flag()));
-        } // 会话结束，令牌随之释放
+        }
         let next = CancelToken::new();
         assert!(
             !cancelled(&next.flag()),
@@ -353,7 +333,7 @@ mod tests {
             request_cancel_send();
             assert!(cancelled(&gone.flag()));
         }
-        // 这一轮应该把已释放的弱引用清掉，否则表会随会话数一直涨。
+
         request_cancel_send();
         let list = TOKENS.lock().unwrap_or_else(|e| e.into_inner());
         assert!(

@@ -1,5 +1,3 @@
-//! 环境变量读取（带缓存），用于调试开关与参数覆盖。
-
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
@@ -9,10 +7,6 @@ fn cache() -> &'static Mutex<HashMap<&'static str, Option<String>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 读一个环境变量：先按本名读，读不到再退回 1.8.0 及更早的 `HWSHARE_` 前缀。
-///
-/// 改名前的老变量（`HWSHARE_CONFIRM` 之类）仍按原样生效，省得升级后
-/// 原来的脚本、快捷方式、命令行参数集体失灵。
 pub fn read(name: &str) -> Option<String> {
     if let Ok(value) = std::env::var(name) {
         return Some(value);

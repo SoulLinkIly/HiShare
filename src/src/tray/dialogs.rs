@@ -1,5 +1,3 @@
-//! 托盘里的对话框与剪贴板发送：选目录、选文件、发剪贴板。
-
 use crate::ui::text::wide;
 use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::HWND;
@@ -44,12 +42,15 @@ pub fn open_or_pick_dest(owner: HWND) {
 }
 
 pub fn send_clipboard_now(owner: HWND) {
-    let targets = crate::peers::targets();
+    let targets = crate::peers::selected();
     if targets.is_empty() {
-        alert(
-            "还没选发送目标",
-            "右键托盘图标 →「发送目标」里勾一台或多台，再发剪贴板。",
-        );
+        let hint = if crate::peers::wanted().is_empty() {
+            "右键托盘图标 →「发送目标」里勾一台或多台，再发剪贴板。"
+        } else {
+            "勾着的设备当前都离线（15 秒没回发现包）。\n\
+             在手机上打开「华为分享」并保持亮屏，它会自动回到目标里。"
+        };
+        alert("没有可用的发送目标", hint);
         return;
     }
     unsafe {
@@ -81,8 +82,6 @@ pub(super) unsafe fn open_folder(dest: &str) {
     );
 }
 
-/// 用默认程序打开一个文件。`.log` 没关联程序时 ShellExecuteW 会返回错误码，
-/// 这时退一步用记事本打开——总比点了菜单毫无反应强。
 pub(super) unsafe fn open_file(path: &str) {
     if path.is_empty() {
         return;
@@ -110,7 +109,6 @@ pub(super) unsafe fn open_file(path: &str) {
         1,
     );
 }
-
 
 unsafe fn pick_folder(owner: HWND) -> Option<std::path::PathBuf> {
     use windows_sys::Win32::System::Com::CoTaskMemFree;
@@ -162,8 +160,6 @@ pub(super) unsafe fn choose_dir(owner: HWND) {
     log_line(&format!("接收目录 -> {text}"));
 }
 
-
-/// 剪贴板文本 → 临时 `.txt`。返回 (文件, 摘要)，失败时已经弹过框。
 pub(super) unsafe fn clipboard_file(owner: HWND) -> Option<(PathBuf, String)> {
     let Some(text) = crate::clipboard::read_text() else {
         message_box(
@@ -249,4 +245,3 @@ fn parse_multi(buffer: &[u16]) -> Vec<PathBuf> {
     }
     names.into_iter().map(|name| dir.join(name)).collect()
 }
-

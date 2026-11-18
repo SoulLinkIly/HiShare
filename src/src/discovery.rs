@@ -1,6 +1,3 @@
-//! 局域网发现：UDP 5684 上的 CoAP 风格 beacon / query / ACK。
-//! 能否接收分享看 `capabilityBitmap` 的掩码值 256，解析结果只有接收 / 不接收两态。
-
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
@@ -34,7 +31,7 @@ pub struct Peer {
     pub brand: String,
     pub kind: String,
     pub last_seen: Instant,
-    /// 对端 `capabilityBitmap` 里有没有 256 位 —— 有才代表「它现在会接收分享」。
+
     pub accepts: bool,
 }
 
@@ -221,15 +218,20 @@ fn parse_options(data: &[u8]) -> Result<(usize, HashMap<u64, Vec<u8>>)> {
     Ok((offset, options))
 }
 
-/// 对端用 CON（首字节 0x4x）发来的应答必须回 4 字节 ACK，否则会按 0 s / 1.2 s / 3.5 s
-/// 重传三次。实测补上这个 ACK 后，一次 query 只收到一个应答。
 pub fn discovery_ack(message_id: [u8; 2]) -> [u8; 4] {
     [0x60, 0x00, message_id[0], message_id[1]]
 }
 
-pub fn parse_discovery_beacon(data: &[u8], host: &str, local_network: Ipv4Addr, local_prefix: u8) -> Result<(Peer, bool, [u8; 2])> {
+pub fn parse_discovery_beacon(
+    data: &[u8],
+    host: &str,
+    lans: &[crate::net::Nic],
+) -> Result<(Peer, bool, [u8; 2])> {
     let src: Ipv4Addr = host.parse().map_err(|_| Error::Format)?;
-    if src == local_network || !same_subnet(src, local_network, local_prefix) {
+    if lans.iter().any(|nic| nic.ip == src) {
+        return Err(Error::Protocol("本机自己的广播".into()));
+    }
+    if !lans.iter().any(|nic| nic.contains(src)) {
         return Err(Error::Protocol("源地址不在本网段".into()));
     }
     if data.len() < 4 || data[0] >> 6 != 1 || (data[0] & 0x0F) > 8 {
@@ -283,8 +285,6 @@ pub fn parse_discovery_beacon(data: &[u8], host: &str, local_network: Ipv4Addr, 
         _ => "unknown",
     };
 
-    // 没有 256 位不代表这是非法包：手机在「关闭」或「仅分享过但没加你」时照样回设备信息，
-    // 只是明说「我不接收」。这种设备要留在列表里，标记成不可发送，而不是当垃圾包丢掉。
     let accepts = first_cap & SHARE_CAPABILITY_BIT != 0;
 
     let service = obj.get("serviceData").and_then(|v| v.as_str()).unwrap_or("");
@@ -295,12 +295,13 @@ pub fn parse_discovery_beacon(data: &[u8], host: &str, local_network: Ipv4Addr, 
         .ok_or(Error::Format)?;
 
     let name = obj.get("devicename").and_then(|v| v.as_str()).unwrap_or("Huawei").to_string();
+
     let device_id = obj
         .get("deviceId")
         .and_then(|v| v.as_str())
         .and_then(|s| serde_json::from_str::<Value>(s).ok())
-        .and_then(|v| v.get("UDID").and_then(|u| u.as_str()).map(|s| s.to_string()))
-        .unwrap_or_else(|| format!("{host}:{port}"));
+        .and_then(|v| v.get("UDID").and_then(|u| u.as_str()).map(|s| s.trim().to_string()))
+        .unwrap_or_default();
 
     let peer = Peer {
         id: device_id,
@@ -319,44 +320,38 @@ pub fn parse_discovery_beacon(data: &[u8], host: &str, local_network: Ipv4Addr, 
     Ok((peer, confirmable, message_id))
 }
 
-fn same_subnet(a: Ipv4Addr, b: Ipv4Addr, prefix: u8) -> bool {
-    if prefix == 0 {
-        return true;
-    }
-    let mask = if prefix >= 32 { u32::MAX } else { u32::MAX << (32 - prefix) };
-    (u32::from(a) & mask) == (u32::from(b) & mask)
+fn unicast_target(target: &str) -> Result<Ipv4Addr> {
+    target.parse().map_err(|_| Error::Argument)
 }
 
 pub struct DiscoverySocket {
     socket: UdpSocket,
-    pub local_ip: Ipv4Addr,
 }
 
 impl DiscoverySocket {
-    pub fn bind(local_ip: Ipv4Addr) -> Result<Self> {
-        let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(local_ip), PORT))
-            .map_err(|e| Error::Io(format!("绑定 {local_ip}:{PORT} 失败: {e}")))?;
+    pub fn bind() -> Result<Self> {
+        let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), PORT))
+            .map_err(|e| Error::Io(format!("绑定 0.0.0.0:{PORT} 失败: {e}")))?;
         socket
             .set_broadcast(true)
             .map_err(|e| Error::Io(format!("开启广播失败: {e}")))?;
         socket
             .set_read_timeout(Some(Duration::from_millis(400)))
             .map_err(|e| Error::Io(e.to_string()))?;
-        let _ = socket.join_multicast_v4(&MULTICAST, &local_ip);
-        Ok(Self { socket, local_ip })
+        let _ = socket.join_multicast_v4(&MULTICAST, &Ipv4Addr::UNSPECIFIED);
+        Ok(Self { socket })
+    }
+
+    pub fn send(&self, dst: Ipv4Addr, data: &[u8]) -> Result<()> {
+        self.socket
+            .send_to(data, SocketAddr::new(IpAddr::V4(dst), PORT))
+            .map_err(|e| Error::Io(format!("发送到 {dst} 失败: {e}")))?;
+        crate::trace::discovery_tx(&dst.to_string(), data);
+        Ok(())
     }
 
     pub fn transmit(&self, target: &str, data: &[u8]) -> Result<()> {
-        let dest = match target {
-            "broadcast" => SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), PORT),
-            "multicast" => SocketAddr::new(IpAddr::V4(MULTICAST), PORT),
-            ip => SocketAddr::new(ip.parse().map_err(|_| Error::Argument)?, PORT),
-        };
-        self.socket
-            .send_to(data, dest)
-            .map_err(|e| Error::Io(format!("发送广播失败: {e}")))?;
-        crate::trace::discovery_tx(target, data);
-        Ok(())
+        self.send(unicast_target(target)?, data)
     }
 
     pub fn recv(&self) -> Option<(String, Vec<u8>)> {
@@ -418,19 +413,60 @@ mod tests {
 
     #[test]
     fn ack_frame_shape() {
-        // 与手机回我们的 ACK（`60 00 d8 3c`）同形：type=ACK(2)、零长度、回显 message id
+
         let ack = discovery_ack([0xD8, 0x3C]);
         assert_eq!(ack, [0x60, 0x00, 0xD8, 0x3C]);
         assert_eq!((ack[0] >> 4) & 3, 2);
         assert_eq!(ack[1], 0x00);
     }
 
+    fn lans() -> Vec<crate::net::Nic> {
+        let row = |ip: &str, mask: &str| -> (u32, u32) {
+            let ip: Ipv4Addr = ip.parse().unwrap();
+            let mask: Ipv4Addr = mask.parse().unwrap();
+            (
+                u32::from_ne_bytes(ip.octets()),
+                u32::from_ne_bytes(mask.octets()),
+            )
+        };
+        crate::net::nics_from_rows(&[
+            row("192.168.123.3", "255.255.255.0"),
+            row("10.8.3.4", "255.255.0.0"),
+        ])
+    }
+
     #[test]
-    fn subnet_match() {
-        let a: Ipv4Addr = "192.168.1.5".parse().unwrap();
-        let b: Ipv4Addr = "192.168.1.9".parse().unwrap();
-        let c: Ipv4Addr = "192.168.2.9".parse().unwrap();
-        assert!(same_subnet(a, b, 24));
-        assert!(!same_subnet(a, c, 24));
+    fn transmit_takes_only_a_real_ip() {
+        assert_eq!(
+            unicast_target("192.168.123.7").unwrap(),
+            Ipv4Addr::new(192, 168, 123, 7)
+        );
+        assert!(unicast_target("broadcast").is_err(), "不许再走全局广播");
+        assert!(unicast_target("multicast").is_err(), "不许再走组播发送");
+    }
+
+    #[test]
+    fn phone_on_either_nic_is_accepted() {
+        for ip in ["192.168.123.7", "10.8.9.7"] {
+            let pkt = discovery_beacon(ip, 41234, "AABB", "nova", false);
+            let got = parse_discovery_beacon(&pkt, ip, &lans());
+            assert!(got.is_ok(), "{ip} 应当被接受：{got:?}");
+        }
+    }
+
+    #[test]
+    fn own_broadcast_is_dropped() {
+        let ip = "192.168.123.3";
+        let pkt = discovery_beacon(ip, 41234, "AABB", "PC", true);
+        let err = parse_discovery_beacon(&pkt, ip, &lans()).unwrap_err();
+        assert!(err.to_string().contains("本机"), "自己的广播会被回环收到，必须丢：{err}");
+    }
+
+    #[test]
+    fn foreign_subnet_is_dropped() {
+        let ip = "172.16.0.9";
+        let pkt = discovery_beacon(ip, 41234, "AABB", "nova", false);
+        let err = parse_discovery_beacon(&pkt, ip, &lans()).unwrap_err();
+        assert!(err.to_string().contains("网段"), "{err}");
     }
 }

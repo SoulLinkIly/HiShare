@@ -1,5 +1,3 @@
-//! 发送侧数据帧：分块、加密、进度上报与限速。
-
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -45,7 +43,6 @@ pub(super) fn parse_ids(inner: &[u8]) -> Result<Vec<u16>> {
         .collect())
 }
 
-/// 进度上报。画不画、画到哪，由进程入口装的 sink 决定（见 `crate::report`）。
 pub(super) fn draw_progress(written: u64, total: u64, t0: Instant, peer_pct: u64) {
     let speed = written as f64 / 1_048_576.0 / t0.elapsed().as_secs_f64().max(0.001);
     crate::report::progress(&crate::report::Progress {

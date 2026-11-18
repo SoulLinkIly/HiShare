@@ -1,5 +1,3 @@
-//! 落盘路径清洗：非法字符、Windows 保留名、重名去重。
-
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
@@ -35,11 +33,6 @@ pub(super) fn preallocate(file: &std::fs::File, size: u64, debug: bool) {
 #[cfg(not(windows))]
 pub(super) fn preallocate(_file: &std::fs::File, _size: u64, _debug: bool) {}
 
-/// 一个正在接收的文件的写入目标。
-///
-/// 绝大多数落盘；名字是 `Huawei Share.txt` 的文本按需求不落盘，直接留在内存里，
-/// 收齐后写剪贴板。两种目标共用「打开 → 写入 → 收尾」这套骨架，接收状态机那边
-/// 不必关心字节到底去了磁盘还是内存。
 pub(super) enum Sink {
     Disk(BufWriter<std::fs::File>),
     Text { buf: Vec<u8>, overflow: bool },
@@ -48,19 +41,16 @@ pub(super) enum Sink {
 pub(super) struct ActiveFile {
     pub(super) sink: Sink,
 
-    /// 落盘：最终目标路径；文本：清单里的名字（不产生文件，只用于日志）。
     pub(super) path: PathBuf,
 
-    /// 落盘：`.part` 路径；文本：空——从头到尾没有临时文件。
     pub(super) part: PathBuf,
     pub(super) written: u64,
 }
 
-/// 一个文件收尾后的结果。
 pub(super) enum Finished {
-    /// 已落盘（`.part` 已改名成目标名）。
+
     Saved(PathBuf),
-    /// 只在内存里，交给剪贴板。
+
     Text { buf: Vec<u8>, overflow: bool },
 }
 
@@ -101,8 +91,7 @@ impl ActiveFile {
         match &mut self.sink {
             Sink::Disk(file) => file.write_all(data)?,
             Sink::Text { buf, overflow } => {
-                // 超过上限就停止缓冲：不撑爆内存，但字节数照记——否则「收了多少」
-                // 和浮窗进度会开始说谎。
+
                 if !*overflow {
                     if buf.len() + data.len() > clip::MAX_BYTES {
                         *overflow = true;
@@ -118,10 +107,6 @@ impl ActiveFile {
         Ok(())
     }
 
-    /// 收尾：落盘的 flush + 改名；文本的把缓冲交出去。
-    ///
-    /// 错误信息在这里拼好（带上路径），调用方只管转成 `Error::Io`——这样
-    /// 「刷新失败 / 改名失败」的文案和以前一致，不会因为搬家而变。
     pub(super) fn finish(self, dest: &Path) -> std::io::Result<Finished> {
         let ActiveFile { sink, path, part, written: _ } = self;
         match sink {

@@ -1,5 +1,3 @@
-//! RSA 身份：密钥生成/加载、OAEP 加解密、公钥 DER 导出。
-
 use rand::rngs::OsRng;
 use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey, LineEnding};
 use rsa::traits::PublicKeyParts;

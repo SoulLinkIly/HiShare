@@ -1,5 +1,3 @@
-//! 发送侧握手细节：字节握手、文件通道请求、逻辑地址与元数据。
-
 use base64::Engine;
 use rand::RngCore;
 

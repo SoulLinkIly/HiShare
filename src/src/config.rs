@@ -1,5 +1,3 @@
-//! `config.json` 读写：接收目录、分块大小。
-
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -9,27 +7,16 @@ static DEST: Mutex<Option<(Option<SystemTime>, PathBuf)>> = Mutex::new(None);
 const CHUNK_MIN: usize = 512;
 const CHUNK_MAX: usize = 65535;
 
-/// 接收目录在「下载」下面叫什么。
 const FOLDER_NAME: &str = "Huawei Share";
 
 pub fn default_dest() -> PathBuf {
     dest_under(&downloads_dir())
 }
 
-/// 只有「下载目录 + 子目录名」这一步，单测可以直接喂一个固定路径进来。
 fn dest_under(downloads: &Path) -> PathBuf {
     downloads.join(FOLDER_NAME)
 }
 
-/// 系统的「下载」文件夹。
-///
-/// **不能拼 `%USERPROFILE%\Downloads`**：这个文件夹是可以被搬到别的盘的
-/// （很多人的机器上都搬过），用户改的是资源管理器里
-/// 那个快捷方式，环境变量的值不会跟着变。拼出来的路径会指向一个连资源管理器
-/// 都不再打开的旧位置，文件「传成功了但找不到」。
-///
-/// `SHGetKnownFolderPath(FOLDERID_Downloads)` 读的就是资源管理器认的那个位置，
-/// 搬过家也会跟着走。拿不到（极老的系统 / 被裁剪过的环境）再退回老办法。
 #[cfg(windows)]
 fn downloads_dir() -> PathBuf {
     use windows_sys::Win32::System::Com::CoTaskMemFree;
@@ -117,9 +104,22 @@ pub fn chunk() -> Option<usize> {
     parse_chunk(&std::fs::read_to_string(config_path()).ok()?)
 }
 
-/// `write_key` 是"读整个文件 → 改一个键 → 写回"，原先两个线程同时改不同键会互相覆盖，
-/// 固定名 `config.json.tmp` 原先还会让 A 的 rename 撞上 B 正在写的半截文件。
-/// 一把写锁 + 每个进程唯一的临时名，把这两件事一起解决。
+fn parse_auto_accept(text: &str) -> Option<bool> {
+    let object = parse_object(text)?;
+    object.get("auto_accept")?.as_bool()
+}
+
+pub fn auto_accept() -> bool {
+    std::fs::read_to_string(config_path())
+        .ok()
+        .and_then(|text| parse_auto_accept(&text))
+        .unwrap_or(false)
+}
+
+pub fn set_auto_accept(on: bool) -> std::io::Result<()> {
+    write_key("auto_accept", serde_json::Value::Bool(on))
+}
+
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn dest_is_huawei_share_under_downloads() {
-        // 目录名带空格是刻意的：和手机、Mac 上看到的「Huawei Share」一致。
+
         assert_eq!(
             dest_under(Path::new(r"F:\Downloads")),
             PathBuf::from(r"F:\Downloads\Huawei Share")
@@ -174,7 +174,7 @@ mod tests {
     fn default_dest_ends_with_folder_name() {
         let path = default_dest();
         assert_eq!(path.file_name().and_then(|s| s.to_str()), Some(FOLDER_NAME));
-        // 上一级必须真的是「下载」，不能是别的地方。
+
         assert!(
             path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()).is_some(),
             "{}",
@@ -199,6 +199,22 @@ mod tests {
         assert_eq!(parse_chunk(r#"{"chunk":65536}"#), None);
         assert_eq!(parse_chunk(r#"{"chunk":"32768"}"#), None);
         assert_eq!(parse_chunk(r#"{"dest":"D:\\x"}"#), None);
+    }
+
+    #[test]
+    fn parse_auto_accept_reads_boolean_only() {
+
+        assert_eq!(parse_auto_accept(r#"{"auto_accept":true}"#), Some(true));
+        assert_eq!(parse_auto_accept(r#"{"auto_accept":false}"#), Some(false));
+        assert_eq!(
+            parse_auto_accept(r#"{"dest":"D:\\x","auto_accept":true}"#),
+            Some(true)
+        );
+
+        assert_eq!(parse_auto_accept(r#"{"auto_accept":"true"}"#), None);
+        assert_eq!(parse_auto_accept(r#"{"auto_accept":1}"#), None);
+        assert_eq!(parse_auto_accept(r#"{"dest":"D:\\x"}"#), None);
+        assert_eq!(parse_auto_accept("not json"), None);
     }
 
     #[test]

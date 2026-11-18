@@ -1,5 +1,3 @@
-//! 发送流程编排：收集文件 → 协商 → 逐文件传输 → 记历史。
-
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -113,17 +111,13 @@ fn walk_dir(
     Ok(())
 }
 
-/// `collect` 的结果。
-///
-/// 以前是个 4 元组，调用点大量出现 `(files, _, _, _)`，读代码时根本对不上号；
-/// 这几个计数各有各的用途（提示用户跳过了什么），值得有名字。
 pub struct Collected {
     pub files: Vec<Outgoing>,
-    /// 被跳过的条目：空目录、非文件、取不到名字的路径。
+
     pub skipped: usize,
-    /// 顶层文件夹个数（决定要不要按相对路径发）。
+
     pub top_dirs: usize,
-    /// 无法表达的空文件夹个数——协议按文件传，装不下空目录。
+
     pub empty_dirs: usize,
 }
 
@@ -237,7 +231,6 @@ pub fn transmit(
 ) -> Result<Report> {
     let started = Instant::now();
 
-    // 这里只为进度条估个总量；真正的错误留给 send_once 里的 collect 去报。
     let planned: Vec<(String, u64)> = match collect(paths) {
         Ok(c) => c.files.iter().map(|f| (f.rel_path.clone(), f.size)).collect(),
         Err(_) => Vec::new(),
@@ -249,7 +242,7 @@ pub fn transmit(
     crate::trace::session_start("send", peer_ip, &local, planned.len(), planned_bytes);
 
     let progress = Arc::new(AtomicU64::new(0));
-    // 每次发送一个独立令牌：多路并行互不牵连，也不会被上一批的取消点名。
+
     let cancel = cancel::CancelToken::new();
 
     let outcome = {
@@ -570,7 +563,6 @@ use dfile::{SendOverlayGuard, data_frame_size, send_batch, settings_profile};
 use handshake::{CHANNEL_BYTES, PEER_META_ACK_FRAME, PEER_META_FRAME, byte_handshake, file_channel_request, is_private_ipv4, logical_addr, send_meta};
 use preview::{build_preview_payload, net_info_offer, net_info_reply, send_preview};
 use session::send_once;
-
 
 pub use cancel::request_cancel_send;
 pub use dfile::chunk_size;

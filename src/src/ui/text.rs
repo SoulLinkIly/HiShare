@@ -1,11 +1,7 @@
-//! 字符串 → 宽字符 / 单行截断。Win32 的 `*W` 接口全要 NUL 结尾的 UTF-16。
-
-/// NUL 结尾的 UTF-16，直接传给 `CreateWindowExW` / `AppendMenuW`（类名、标题、菜单）。
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// 超过 `max` 个字符就截断并补一个省略号；截断处尾随空格会去掉（避免 "名字 …"）。
 pub fn truncate(s: &str, max: usize) -> String {
     if max == 0 || s.chars().count() <= max {
         return s.to_string();

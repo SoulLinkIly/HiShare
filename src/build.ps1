@@ -125,9 +125,46 @@ $targetDir = Join-Path $env:LOCALAPPDATA 'HiShare\build'
 if ($env:HISHARE_TARGET_DIR) { $targetDir = $env:HISHARE_TARGET_DIR }
 $env:CARGO_TARGET_DIR = $targetDir
 
+# ---------------------------------------------------------------- path remap
+# panic messages carry the absolute path of the .rs file that panicked. For
+# third-party crates that path is the registry cache, so a shipped exe leaks
+# the builder's user name and directory layout ("E:\work\soft\rust\cargo\..."
+# was readable with strings). --remap-path-prefix rewrites those prefixes at
+# compile time into stable fake roots: the text stays useful for debugging,
+# but every machine produces the same bytes.
+#
+# Longest prefix wins in rustc, so specific roots may be listed in any order.
+# Paths containing spaces are skipped: RUSTFLAGS is split on whitespace and
+# there is no quoting that survives that split.
+$remapPairs = @(
+    @{ From = $env:CARGO_HOME;  To = '/rust/cargo' },
+    @{ From = $env:RUSTUP_HOME; To = '/rust/rustup' },
+    @{ From = $targetDir;       To = '/target' },
+    @{ From = (Split-Path $PSScriptRoot -Parent); To = '/hishare' },
+    @{ From = $env:USERPROFILE; To = '/user' }
+)
+if ($windres) { $remapPairs += @{ From = (Split-Path (Split-Path $windres -Parent) -Parent); To = '/mingw' } }
+
+$remapFlags = @()
+foreach ($pair in $remapPairs) {
+    $from = $pair.From
+    if (-not $from) { continue }
+    $from = $from.TrimEnd('\')
+    if ($from -match '\s') {
+        Write-Host "[warn] remap skipped, path has spaces: $from"
+        continue
+    }
+    $remapFlags += "--remap-path-prefix=$from=$($pair.To)"
+}
+if ($remapFlags.Count -gt 0) {
+    $extra = $remapFlags -join ' '
+    if ($env:RUSTFLAGS) { $env:RUSTFLAGS = "$env:RUSTFLAGS $extra" } else { $env:RUSTFLAGS = $extra }
+}
+
 Write-Host "[info] cargo     : $cargo"
 Write-Host "[info] windres   : $(if ($windres) { $windres } else { '(missing)' })"
 Write-Host "[info] target dir: $targetDir"
+Write-Host "[info] remap     : $($remapFlags.Count) prefix(es)"
 
 $cargoArgs = @()
 if ($Offline) { $cargoArgs += '--offline' }

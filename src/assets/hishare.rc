@@ -1,8 +1,8 @@
 1 ICON "assets/hishare.ico"
 
 1 VERSIONINFO
-FILEVERSION 1,8,0,0
-PRODUCTVERSION 1,8,0,0
+FILEVERSION 1,8,6,0
+PRODUCTVERSION 1,8,6,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -15,12 +15,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "LCH"
             VALUE "FileDescription", "HiShare（Windows 端）"
-            VALUE "FileVersion", "1.8.0"
+            VALUE "FileVersion", "1.8.6"
             VALUE "InternalName", "hishare"
             VALUE "LegalCopyright", "Copyright (c) 2026 LCH"
             VALUE "OriginalFilename", "hishare.exe"
             VALUE "ProductName", "HiShare"
-            VALUE "ProductVersion", "1.8.0"
+            VALUE "ProductVersion", "1.8.6"
         END
     END
     BLOCK "VarFileInfo"

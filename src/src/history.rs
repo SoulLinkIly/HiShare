@@ -1,28 +1,19 @@
-//! 传输历史：每次收发往 `transfers.log` 记一行，超过 1 MB 轮转。
-//!
-//! 这份文件就是给用户直接打开的：制表符分隔，一行一次传输，首行是表头。
-//! 想看「几点、发给谁、几个文件、多大」不需要程序另做界面——记事本打开即可，
-//! 或者直接拖进 Excel。
-
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
 const MAX_LOG: u64 = 1024 * 1024;
 
-/// 首行表头。新文件（含轮转后的新文件）第一次写入时补上。
 const HEADER: &str = "时间\t方向\t设备\t结果\t文件数\t大小\t耗时\t速度\t文件列表\t备注\n";
 
 fn log_path() -> PathBuf {
     crate::store::path("transfers.log")
 }
 
-/// 日志文件位置。托盘菜单「打开传输日志」用它。
 pub fn log_file() -> PathBuf {
     log_path()
 }
 
-/// 一行的方向列：日志里给人看，写中文。
 fn direction_label(raw: &str) -> &str {
     match raw {
         "send" => "发送",
@@ -43,14 +34,10 @@ fn describe_transfer(files: &[(String, u64)]) -> String {
     text.replace('\t', " ")
 }
 
-/// 大小列。一律按 MB 写的话，一段剪贴板文本、一张小图都会显示成 `0.0 MB`，
-/// 看着像「什么也没传」。按量级换单位（实现见 [`crate::human::bytes`]），
-/// 让这一列自己就能读懂。
 fn size_text(bytes: u64) -> String {
     crate::human::bytes(bytes)
 }
 
-/// 一次传输 → 日志里的一行（含换行）。
 fn format_line(
     stamp: &str,
     direction: &str,
@@ -109,16 +96,13 @@ pub fn record(
         note,
     );
 
-    // 多路并行时（最多 4 路发送 + 16 路接收）会有多个线程同时往这一份文件追加。
-    // 单行超过 4 KiB 时系统不保证一次写入的原子性，可能两行交错成一条乱码，
-    // 所以这里用一把进程内的锁把"打开 + 写整行"串起来。
     let _ = migrate_legacy(&path);
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
     {
-        // 空文件（新建或刚轮转）先补表头，用记事本打开就能看懂列。
+
         if file.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
             let _ = file.write_all(HEADER.as_bytes());
         }
@@ -126,11 +110,6 @@ pub fn record(
     }
 }
 
-/// 老版本写的日志没有表头、方向列是 `send` / `recv`。
-///
-/// 直接把表头补在末尾是没有意义的，只能整份重写一次；只动方向列的那一格，
-/// 其余字节（含文件列表里的英文单词）一个不碰。每进程只试一次，失败就算了——
-/// 日志格式不统一不该影响收发本身。
 fn migrate_legacy(path: &std::path::Path) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static DONE: AtomicBool = AtomicBool::new(false);
@@ -139,7 +118,7 @@ fn migrate_legacy(path: &std::path::Path) -> std::io::Result<()> {
     }
 
     let Ok(text) = std::fs::read_to_string(path) else {
-        return Ok(()); // 还没有日志，交给正常写入去建。
+        return Ok(());
     };
     if !has_legacy_token(&text) {
         return Ok(());
@@ -151,12 +130,11 @@ fn migrate_legacy(path: &std::path::Path) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// 整份重写：补表头 + 把旧英文列换成中文。纯函数，方便直接测。
 fn rewrite_legacy(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + HEADER.len());
     out.push_str(HEADER);
     for line in text.lines() {
-        // 旧表头（如果有）丢掉，下面统一只写一份。
+
         if line.starts_with("时间\t") {
             continue;
         }
@@ -179,10 +157,6 @@ fn rewrite_legacy(text: &str) -> String {
     out
 }
 
-/// 这份日志里还有没有旧格式的英文列（`send` / `recv` / `OK` / `FAIL`）。
-///
-/// 用「有没有旧记号」而不是「有没有表头」判断：上一次迁移可能中途失败或只改了一半，
-/// 那样文件既有表头又留着英文列，只认表头就永远修不好了。
 fn has_legacy_token(text: &str) -> bool {
     ["\tsend\t", "\trecv\t", "\tOK\t", "\tFAIL\t"]
         .iter()
@@ -226,7 +200,7 @@ mod tests {
             true,
             "",
         );
-        // 只去掉换行：备注为空时行尾仍留一个制表符，那是一个空列，不是多余字符。
+
         let cols: Vec<&str> = line.trim_end_matches('\n').split('\t').collect();
         assert_eq!(cols.len(), 10, "列数要跟表头一致：{line}");
         assert_eq!(cols[0], "2026-11-07 14:20:31", "要能看出几点");
@@ -294,7 +268,6 @@ mod tests {
         assert!(new.contains("对方取消"), "备注不能丢");
         assert!(!has_legacy_token(&new), "改完就不该再有英文列");
 
-        // 再跑一次必须原样：否则每次启动都要重写一遍日志。
         assert_eq!(rewrite_legacy(&new), new, "迁移要幂等");
     }
 }

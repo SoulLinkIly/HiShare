@@ -259,6 +259,12 @@ fn frame_order_and_done_ack() {
         .max()
         .unwrap();
     assert_eq!(big + 8, DFS, "满帧应正好等于 dfs");
+
+    let raw = std::fs::read_to_string(&capture).unwrap_or_default();
+    assert!(
+        raw.contains("收到 DONE ACK"),
+        "接收端没读到对端的 DONE_ACK，收尾会撞 RST"
+    );
 }
 
 #[test]

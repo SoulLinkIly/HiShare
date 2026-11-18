@@ -1,16 +1,5 @@
-//! 统一的事件出口：日志行与文本进度条。
-//!
-//! 协议层（`outbound` / `receive`）不直接 `print!`：谁在跑这个进程，就由谁决定
-//! 事件去哪里。GUI 装一个「写托盘日志、不画文本进度」的 sink；CLI 不装，
-//! 默认 sink 就直接打到 stderr / stdout。
-//!
-//! 以前这件事靠一个全局开关 `outbound::set_progress_lines(false)`：库自己默认
-//! 往 stdout 画进度条，调用方必须"知道"要关，否则托盘进程里会攒下一堆没人看的
-//! 输出。现在只有装 sink 这一个动作，而且发生在进程入口。
-
 use std::sync::OnceLock;
 
-/// 一次进度上报。`peer_pct` 是对端回报的百分比（只有部分设备会给）。
 pub struct Progress {
     pub written: u64,
     pub total: u64,
@@ -38,7 +27,6 @@ fn sinks() -> &'static Sinks {
     })
 }
 
-/// 装一次 sink。已经装过（或默认 sink 已被用过）时返回 `false`，不覆盖。
 pub fn install(log: Logger, paint: Painter, end: Ender) -> bool {
     SINKS.set(Sinks { log, paint, end }).is_ok()
 }
@@ -51,7 +39,6 @@ pub fn progress(p: &Progress) {
     (sinks().paint)(p);
 }
 
-/// 一批传完：默认 sink 补一个换行，别让下一行输出接在进度条后面。
 pub fn end_line() {
     (sinks().end)();
 }
@@ -92,7 +79,7 @@ mod tests {
 
     #[test]
     fn default_sinks_are_usable_without_install() {
-        // 测试进程不装 sink：这里只是确认默认实现不会 panic。
+
         progress(&Progress {
             written: 1,
             total: 2,

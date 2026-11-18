@@ -1,5 +1,3 @@
-//! 动态加载 gdiplus，画抗锯齿圆弧（加载失败时调用方退回折线）。
-
 #![cfg(windows)]
 
 use crate::ui::text::wide;

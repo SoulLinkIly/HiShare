@@ -1,6 +1,3 @@
-//! 常驻浮窗：进度卡与「把文件拖进这里」投放面板。
-//! 100 ms 心跳驱动重绘，贴边动画由独立的 16 ms `ANIM_TIMER` 驱动，界面状态见 `Phase` / `Panel`。
-
 #![cfg(windows)]
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -62,7 +59,6 @@ const TIMER_ID: usize = 1;
 
 const ANIM_TIMER: usize = 2;
 
-/// 浮窗的窗口类名。`register_class` 与 `CreateWindowExW` 必须用同一个。
 const CLASS: &str = "HiShareCard";
 
 const ANIM_MS: u32 = 300;
@@ -71,20 +67,18 @@ const ANIM_IN_PART: f32 = 0.35;
 
 const RESTORE_HOLD_MS: u32 = 3000;
 
-/// 浮窗处于哪个阶段。以前是一个裸 u8，读写处散落着 `== 2`、`!= 0` 这种魔法值，
-/// 想确认"这套组合合不合法"只能去翻所有分支；现在类型里就写着。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 enum Phase {
-    /// 不可见（或正在淡出）。
+
     Hidden = 0,
-    /// 可见：按 `Panel` 决定画投放面板还是进度卡。
+
     Active = 1,
-    /// 传完了，停留 3 秒展示结果。
+
     Done = 2,
-    /// 等对方点接收。
+
     Waiting = 3,
-    /// 失败或已取消，停留 3 秒。
+
     Failed = 4,
 }
 
@@ -105,72 +99,56 @@ impl Phase {
     }
 }
 
-/// 可见时画什么。
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum Panel {
-    /// 环形进度 + 取消按钮。
+
     Progress = 0,
-    /// 「把文件拖进这里」的投放面板。
+
     Drop = 1,
 }
 
-/// 多目标轮播视图：目标名、已传字节、总字节、速度（KB/s）。
-/// progress 每次进度更新推送一组，浮窗心跳每 3 秒切到下一份。
 pub type View = (String, u64, u64, u32);
 
-/// 结果卡展示完之后去哪。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum After {
-    /// 回到常驻投放面板。
+
     DropPanel,
-    /// 收起。被动接收/发送的常态就是这一种。
+
     Hidden,
 }
 
-/// 只根据快照决定归宿，便于单测（不需要真的建窗口）。
 fn after_done(back: Option<Restore>) -> After {
     match back {
-        // 传输是从用户钉住的投放面板发起的：传完把面板还给他。
+
         Some(r) if r.pinned => After::DropPanel,
-        // 其余情况（浮窗原本不可见、或只是临时展开）一律收起。
+
         _ => After::Hidden,
     }
 }
 
-/// 一次传输结束之后要回到的「常驻形态」。
-///
-/// 以前收尾是写死切回投放面板并把 `PINNED` 置真：哪怕这次传输是被动接收、
-/// 浮窗原本根本不可见，传完之后屏幕上也永久多出一块「把文件拖进这里」。
-/// 现在进传输前记一份，结束后照原样还回去。
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Restore {
     panel: Panel,
     pinned: bool,
 }
 
-/// 浮窗的全部视图模型。
-///
-/// 以前这些字段是 20 多个互不相干的 `static`：传输线程写 `PCT`，UI 线程读
-/// `PCT`，谁也说不清「phase 与 panel 是不是一起变」。现在只有一把锁，
-/// 跨线程的读写都在 [`with_model`] 里完成，剩下的 `static` 都是纯 UI 线程的
-/// 运行时状态（窗口句柄、动画、DPI、字体缓存）。
 struct Model {
     phase: Phase,
     panel: Panel,
-    /// 投放面板是不是用户「钉住」的常驻态（托盘菜单 / 双击叫出来的）。
+
     pinned: bool,
-    /// 进入传输前的常驻形态；没有正在进行的传输时为 `None`。
+
     restore: Option<Restore>,
     pct: u32,
     received: u64,
     total: u64,
-    /// 当前显示目标的速度（KB/s）。唯一来源是 `progress` 推来的视图。
+
     speed_kb: u32,
     name: String,
-    /// 图标用媒体样式还是文件样式，由 `progress` 按真实文件名决定。
+
     media: bool,
-    /// 本批文件数 > 1。与「多目标」是两件事，过去共用一个 `MULTI` 出过 bug。
+
     outgoing: bool,
     preparing: bool,
     canceled: bool,
@@ -225,16 +203,15 @@ static LAST_PCT: AtomicU32 = AtomicU32::new(u32::MAX);
 static LAST_SPEED: AtomicU32 = AtomicU32::new(u32::MAX);
 static LAST_MODE: AtomicU8 = AtomicU8::new(u8::MAX);
 
-/// 贴边相关的三个量必须一起变才有意义（倒计时到期要同时清掉、强制展开结束也一样），
-/// 所以合成一个结构体，用一把锁保证原子性。以前是三个原子量各改各的，
-/// 「传输中闪一下」就是因为缩回动画和强制展开互相不知道对方存在。
+static LAST_DOWN_HIT: AtomicU8 = AtomicU8::new(Hit::None as u8);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct EdgeState {
-    /// 停靠在哪条边；`None` = 自由浮动。
+
     edge: crate::float::Edge,
-    /// 缩回边的时刻（ms，0 = 没有倒计时）。
+
     restore_at: u32,
-    /// 强制展开到此刻（ms，0 = 不强制）。
+
     hold_until: u32,
 }
 
@@ -263,14 +240,8 @@ fn unpark() -> crate::float::Edge {
 
 static STARTUP_RESTORE: AtomicBool = AtomicBool::new(false);
 
-/// 双击托盘要立刻收起：定时器下一拍直接隐藏，不走淡出。
 static HIDE_NOW: AtomicBool = AtomicBool::new(false);
 
-/// 托盘（或重复启动的另一个实例）要求「把浮窗拿出来」。
-///
-/// 只置标志、不直接挪窗口：`move_to` 改的是 UI 线程自己那份 `WIN_POS`，
-/// 从别的线程 `SetWindowPos` 会和心跳抢位置，看起来就是抖一下。真正的移动
-/// 统一放到 `WM_TIMER` 里做。
 static REVEAL: AtomicBool = AtomicBool::new(false);
 
 static FADE: AtomicU32 = AtomicU32::new(255);
@@ -281,8 +252,6 @@ static VISIBLE: AtomicBool = AtomicBool::new(false);
 
 static LAST_ALPHA: AtomicU32 = AtomicU32::new(u32::MAX);
 
-/// 每 100 ms 心跳推进一拍，96 让淡入/淡出各 3 拍完成（约 300 ms）。
-/// 原来是 42（7 拍约 700 ms）；底盘不再跟着透明后，停留太久会显得拖沓。
 const FADE_STEP: u32 = 96;
 
 static ANIM_ON: AtomicBool = AtomicBool::new(false);
@@ -292,12 +261,11 @@ static ANIM_EDGE: AtomicU8 = AtomicU8::new(0);
 static ANIM_FROM: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
 static ANIM_FULL: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
 static ANIM_REST: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
-/// 浮窗自己的画布。GDI 绘制与提交都在浮窗线程上，锁竞争只可能发生在重建时。
+
 static CANVAS: Mutex<Option<Canvas>> = Mutex::new(None);
 
 static CARD_HWND: AtomicIsize = AtomicIsize::new(0);
 
-/// 100 ms 心跳只在窗口可见/有任务时运行，彻底隐藏后停掉，别让空闲进程每 100 ms 醒一次。
 static TIMER_ON: AtomicBool = AtomicBool::new(false);
 
 static LAST_REFRESH_MS: AtomicU32 = AtomicU32::new(0);
@@ -311,7 +279,6 @@ fn now_ms() -> u32 {
     crate::clock::now_millis() as u32
 }
 
-/// 把一份目标视图写进模型（调用方已持锁）。
 fn apply_view(v: &View, m: &mut Model) {
     m.name = v.0.clone();
     m.received = v.1;
@@ -324,7 +291,6 @@ fn apply_view(v: &View, m: &mut Model) {
     m.speed_kb = v.3;
 }
 
-/// progress 推来的最新视图。单份时直接显示；多份时启动 / 维持 3 秒轮播。
 pub fn set_views(views: Vec<View>) {
     with_model(|m| {
         let was_multi = m.views.len() > 1;
@@ -350,7 +316,6 @@ pub fn set_views(views: Vec<View>) {
     });
 }
 
-/// 到点切到下一个目标。只在进度卡可见时轮播，避免结果卡上的名字乱跳。
 fn tick_carousel(now: u32) -> bool {
     if !matches!(phase(), Phase::Active | Phase::Waiting) || panel() != Panel::Progress {
         return false;
@@ -381,7 +346,6 @@ pub fn is_media_name(name: &str) -> bool {
     )
 }
 
-/// 由 progress 显式指定图标类型：标题换成目标名后不能再拿标题猜文件类型。
 pub fn set_media(v: bool) {
     with_model(|m| m.media = v);
 }
@@ -450,28 +414,22 @@ pub fn set_outgoing(ours: bool) {
     with_model(|m| m.outgoing = ours);
 }
 
-/// 从「投放面板」或隐藏状态切到进度卡。
-///
-/// 进度层每次更新都会调它，所以必须**幂等**：面板已经是进度卡时什么都不做，
-/// 别把已传字节清零。以前多目标分支用的是 `state() != 1` 判断，而拖文件进来
-/// 时浮窗正是 `Active`，条件恒不成立，于是面板永远停在投放态、进度一个像素都不画。
 pub fn show_progress(name: &str) {
     if phase() == Phase::Hidden || panel() == Panel::Drop {
         start(name);
     }
 }
 
-/// 打开一次传输的显示：记下常驻形态，清干净上一批的进度，切到进度卡。
 fn open(name: &str, to: Phase, prep: bool) {
     with_model(|m| {
-        // 只在「从空闲进入传输」时拍快照；同一批的后续 start/waiting 不覆盖。
+
         if !matches!(m.phase, Phase::Active | Phase::Waiting) || m.panel == Panel::Drop {
             m.restore = Some(Restore {
                 panel: m.panel,
                 pinned: m.pinned,
             });
         }
-        // 传输期间不算「用户钉住的投放面板」：否则各种收尾路径会把面板叫回来。
+
         m.pinned = false;
         m.phase = to;
         m.panel = Panel::Progress;
@@ -519,7 +477,6 @@ pub fn update(received: u64, total: u64) {
     });
 }
 
-/// 传输结束。`pinned` 在开传时已经清掉，这里只需记住结果卡的时刻。
 pub fn finish() {
     if phase() == Phase::Hidden || canceled() {
         return;
@@ -544,17 +501,12 @@ pub fn fail() {
     hold_expanded_for(RESTORE_HOLD_MS);
 }
 
-/// 异常收尾：只处理「正在传输」的浮窗，已经结束/已隐藏的不再动。
-///
-/// 给 Drop 守卫调用，所以必须幂等——历史上这里靠调用方手写成对的
-/// `fail()` + `hide()`，漏一处就是「卡在半屏」。现在只有这一个入口。
 pub fn abort() {
     if panel() == Panel::Progress && matches!(phase(), Phase::Active | Phase::Waiting) {
         fail();
     }
 }
 
-/// 收起浮窗（不改变常驻形态）。结果卡正在展示时不受影响。
 pub fn hide_idle() {
     if matches!(phase(), Phase::Done | Phase::Failed) {
         return;
@@ -565,7 +517,6 @@ pub fn hide_idle() {
     });
 }
 
-/// 让投放面板常驻显示（托盘菜单 / 双击托盘）。
 pub fn show_drop_panel() {
     with_model(|m| {
         m.panel = Panel::Drop;
@@ -578,7 +529,6 @@ pub fn show_drop_panel() {
     arm_timer();
 }
 
-/// 让心跳跑起来。窗口还没建好时直接返回，建好那一侧会再调一次。
 fn arm_timer() {
     let hwnd = CARD_HWND.load(Ordering::SeqCst);
     if hwnd == 0 {
@@ -617,7 +567,6 @@ unsafe fn run_card() {
     let instance = GetModuleHandleW(std::ptr::null());
     let class: Vec<u16> = "HiShareCard\0".encode_utf16().collect();
 
-    // 窗口类注册、DPI 取值都走公共骨架；浮窗额外要双击消息（CS_DBLCLKS）。
     crate::ui::popup::register_class(CLASS, Some(wndproc), crate::ui::popup::CS_DBLCLKS);
     let dpi = crate::ui::popup::system_dpi();
     DPI.store(dpi as u32, Ordering::SeqCst);
@@ -685,13 +634,11 @@ unsafe fn run_card() {
     CARD_HWND.store(0, Ordering::SeqCst);
 }
 
-/// 换掉画布：旧 Canvas 在这里析构（Drop 里释放 DC 与 DIB）。
 fn set_canvas(next: Option<Canvas>) {
     if let Ok(mut slot) = CANVAS.lock() {
         *slot = next;
     }
 }
-
 
 unsafe fn commit(hwnd: HWND) {
     let mut guard = CANVAS.lock().unwrap_or_else(|e| e.into_inner());
@@ -710,8 +657,7 @@ unsafe fn commit(hwnd: HWND) {
     let radius = crate::ui::theme::RADIUS;
     let x = WIN_POS[0].load(Ordering::SeqCst);
     let y = WIN_POS[1].load(Ordering::SeqCst);
-    // 白色底盘不参与淡入淡出：CPU 侧只把内容颜色往底盘色插值，
-    // 整帧恒以 255 提交，底盘从第一帧起就完全不透明，圆角仍交给合成器。
+
     canvas.fade_content(COL_BG, FADE.load(Ordering::SeqCst).min(255) as u8);
     canvas.commit(
         hwnd,
@@ -733,12 +679,12 @@ fn cancel_rect() -> (i32, i32, i32, i32) {
     (x1, y1, x2, y2)
 }
 
-/// 卡片上唯一可点的两个位置（关闭叉 / 取消按钮），绘制和命中共用同一份几何。
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 enum Hit {
-    None,
-    Close,
-    Cancel,
+    None = 0,
+    Close = 1,
+    Cancel = 2,
 }
 
 fn inside(r: (i32, i32, i32, i32), x: i32, y: i32) -> bool {
@@ -793,6 +739,17 @@ unsafe fn move_to(hwnd: HWND, x: i32, y: i32) {
     WIN_POS[1].store(y, Ordering::SeqCst);
 }
 
+fn cursor_inside() -> bool {
+    let w = WIN_SIZE[0].load(Ordering::SeqCst);
+    let h = WIN_SIZE[1].load(Ordering::SeqCst);
+    let (x, y) = (
+        WIN_POS[0].load(Ordering::SeqCst),
+        WIN_POS[1].load(Ordering::SeqCst),
+    );
+    let (mx, my) = crate::float::cursor();
+    mx >= x && mx < x + w && my >= y && my < y + h
+}
+
 unsafe fn tuck_tick(hwnd: HWND) {
     let edge = parked_edge();
     if edge == crate::float::Edge::None
@@ -802,8 +759,7 @@ unsafe fn tuck_tick(hwnd: HWND) {
     {
         return;
     }
-    // 传输中要一直留在外面：正在跑的"缩回边"动画、以及 3 秒倒计时都立刻作废，
-    // 否则会先缩一下再弹回来，看起来就是闪一下。
+
     let busy = busy_transfer();
     if busy {
         if ANIM_ON.swap(false, Ordering::SeqCst) {
@@ -819,43 +775,56 @@ unsafe fn tuck_tick(hwnd: HWND) {
         WIN_POS[0].load(Ordering::SeqCst),
         WIN_POS[1].load(Ordering::SeqCst),
     );
-    let (mx, my) = crate::float::cursor();
-    let inside = mx >= x && mx < x + w && my >= y && my < y + h;
+    let inside = cursor_inside();
 
-    // 传输中（进度卡 / 等待确认）和刚传完的 3 秒里，不管鼠标在哪都展开，
-    // 否则贴边时看不见进度、也看不见"已完成 / 失败"。
     let peek = crate::float::PEEK;
-    let want = if busy || hold_expanded() || inside {
-        crate::float::expanded_pos(edge, x, y, w, h)
-    } else {
-        crate::float::tucked_pos(edge, x, y, w, h, peek)
-    };
-    if want != (x, y) {
-        move_to(hwnd, want.0, want.1);
+    let expanded = crate::float::expanded_pos(edge, x, y, w, h);
+    let tucked = crate::float::tucked_pos(edge, x, y, w, h, peek);
+
+    if !busy && !hold_expanded() && !inside {
+
+        if (x, y) == tucked {
+            return;
+        }
+        if panel() == Panel::Drop {
+
+            arm_restore_tuck();
+            return;
+        }
+        move_to(hwnd, tucked.0, tucked.1);
+        return;
+    }
+    if (x, y) != expanded {
+        move_to(hwnd, expanded.0, expanded.1);
         if inside {
 
-            crate::float::save_layout(want.0, want.1, edge);
+            crate::float::save_layout(expanded.0, expanded.1, edge);
         }
     }
 }
 
 unsafe fn finish_drag(hwnd: HWND) {
-    let edge = crate::float::drag_end();
-    park(edge);
+    let Some(edge) = crate::float::drag_end() else {
+        return;
+    };
     let w = WIN_SIZE[0].load(Ordering::SeqCst);
     let h = WIN_SIZE[1].load(Ordering::SeqCst);
     let (x, y) = (
         WIN_POS[0].load(Ordering::SeqCst),
         WIN_POS[1].load(Ordering::SeqCst),
     );
+    park(edge);
     if edge == crate::float::Edge::None {
         crate::float::save_layout(x, y, crate::float::Edge::None);
         return;
     }
-    start_tuck_anim(hwnd, edge, x, y);
-
     let expanded = crate::float::expanded_pos(edge, x, y, w, h);
     crate::float::save_layout(expanded.0, expanded.1, edge);
+    if busy_transfer() {
+        move_to(hwnd, expanded.0, expanded.1);
+        return;
+    }
+    start_tuck_anim(hwnd, edge, x, y);
 }
 
 unsafe fn start_tuck_anim(hwnd: HWND, edge: crate::float::Edge, x: i32, y: i32) {
@@ -885,12 +854,10 @@ fn cancel_restore_tuck() {
     with_edge(|s| s.restore_at = 0);
 }
 
-/// `at` 这个时刻到了没有（0 表示没设定）。用回绕比较，避免 49 天溢出。
 fn reached(at: u32) -> bool {
     at != 0 && now_ms().wrapping_sub(at) < 0x8000_0000
 }
 
-/// 到期返回真（并把倒计时清掉，避免重复触发）。
 fn restore_tuck_due() -> bool {
     with_edge(|s| {
         if !reached(s.restore_at) {
@@ -905,8 +872,6 @@ fn busy_transfer() -> bool {
     phase() == Phase::Waiting || (phase() == Phase::Active && panel() == Panel::Progress)
 }
 
-/// 还在"必须展开"的窗口里。注意是**未到期**，之前这里跟 `restore_tuck_due` 抄了同一个
-/// 比较方向，导致 3 秒展示期其实是靠"淡出恰好在同一时刻开始"才没露馅。
 fn hold_expanded() -> bool {
     with_edge(|s| s.hold_until != 0 && !reached(s.hold_until))
 }
@@ -920,8 +885,6 @@ fn cancel_hold() {
     with_edge(|s| s.hold_until = 0);
 }
 
-/// 拖到另一块缩放率不同的屏幕上：按新 DPI 重建画布与字体。
-/// 之前只在建窗时取一次 `GetDpiForSystem`，跨屏移动后整张卡还是旧尺寸，字会糊。
 unsafe fn resize_for_dpi(hwnd: HWND, dpi: i32, lparam: LPARAM) {
     if dpi <= 0 {
         return;
@@ -949,7 +912,6 @@ unsafe fn resize_for_dpi(hwnd: HWND, dpi: i32, lparam: LPARAM) {
         SWP_NOZORDER | SWP_NOACTIVATE,
     );
 
-    // 字体是按像素高度缓存的，DPI 变了必须丢掉重建，否则还是旧字号。
     for slot in FONTS.iter() {
         let f = slot.swap(0, Ordering::SeqCst);
         if f != 0 {
@@ -959,7 +921,6 @@ unsafe fn resize_for_dpi(hwnd: HWND, dpi: i32, lparam: LPARAM) {
     commit(hwnd);
 }
 
-/// 隐藏后把刚才露在屏幕上的那条边重画一遍，避免分层窗口留下残影。
 unsafe fn repaint_strip() {
     let w = WIN_SIZE[0].load(Ordering::SeqCst);
     let h = WIN_SIZE[1].load(Ordering::SeqCst);
@@ -1038,7 +999,6 @@ unsafe fn anim_tick(hwnd: HWND) {
     }
 }
 
-/// 展开到完整位置，但**保留**停靠边，让 3 秒后能自己缩回原来那条边。
 unsafe fn show_expanded_keeping_edge(hwnd: HWND) {
     if ANIM_ON.swap(false, Ordering::SeqCst) {
         KillTimer(hwnd, ANIM_TIMER);
@@ -1058,16 +1018,12 @@ unsafe fn show_expanded_keeping_edge(hwnd: HWND) {
     move_to(hwnd, p.0, p.1);
 }
 
-/// 把缩在屏幕边上的浮窗整个展开，并重新给 3 秒后自动缩回。
-///
-/// 和启动时那条路径（`show_expanded_keeping_edge` + `arm_restore_tuck`）刻意保持一致：
-/// 用户想要的是"让我看一眼"，不是把浮窗永久钉在桌面上。
 unsafe fn reveal_now(hwnd: HWND) {
     if phase() == Phase::Hidden || !VISIBLE.load(Ordering::SeqCst) || busy_transfer() {
         return;
     }
     if parked_edge() == crate::float::Edge::None {
-        // 自由浮动，本来就在外面。
+
         return;
     }
     show_expanded_keeping_edge(hwnd);
@@ -1445,7 +1401,6 @@ fn lo_word(v: LPARAM) -> i32 {
     (v & 0xFFFF) as u16 as i16 as i32
 }
 
-/// 当前勾选的发送目标（可多台）。命中缓存时直接用，省掉一次锁 + 排序。
 fn current_targets() -> Vec<crate::peers::PeerInfo> {
     let cached = TARGET_VIEW
         .lock()
@@ -1453,12 +1408,18 @@ fn current_targets() -> Vec<crate::peers::PeerInfo> {
         .and_then(|g| g.as_ref().map(|v| v.selected.clone()));
     match cached {
         Some(list) if !list.is_empty() => list,
-        _ => crate::peers::targets(),
+        _ => crate::peers::selected(),
     }
 }
 
+fn offline_picks() -> usize {
+    crate::peers::wanted()
+        .len()
+        .saturating_sub(crate::peers::selected().len())
+}
+
 fn refresh_target_view() -> bool {
-    let view = crate::peers::view(crate::peers::LIST_TTL);
+    let view = crate::peers::view();
     let changed = LAST_TARGET_REV.swap(view.revision, Ordering::SeqCst) != view.revision;
     if let Ok(mut slot) = TARGET_VIEW.lock() {
         *slot = Some(view);
@@ -1554,17 +1515,23 @@ unsafe fn draw_drop(hdc: HDC, vw: i32, vh: i32) {
     SelectObject(hdc, old);
 
     let targets = current_targets();
+    let offline = offline_picks();
     let sub = match targets.as_slice() {
+
+        [] if offline > 0 => format!("{offline} 台目标离线 · 恢复后自动选中"),
         [] => "未选发送目标 · 托盘里挑一台".to_string(),
-        [one] if !crate::peers::is_online(one) => {
-            format!("{}（离线）", truncate(&one.name, 12))
-        }
         [one]
             if crate::peers::verdict(&one.host) == Some(crate::peers::Verdict::Closed) =>
         {
             format!("{} 上次拒收了（可能没开华为分享）", truncate(&one.name, 12))
         }
         [one] => format!("发送给 {}", truncate(&one.name, 12)),
+        [first, rest @ ..] if offline > 0 => format!(
+            "同时发送给 {} 等 {} 台（{} 台离线）",
+            truncate(&first.name, 8),
+            rest.len() + 1,
+            offline
+        ),
         [first, rest @ ..] => format!(
             "同时发送给 {} 等 {} 台",
             truncate(&first.name, 8),
@@ -1618,14 +1585,32 @@ unsafe fn handle_drop(hdrop: *mut std::ffi::c_void) {
         return;
     }
 
-    let targets = current_targets();
+    let targets = crate::peers::selected();
     if targets.is_empty() {
-        crate::tray::alert(
-            "还没选发送目标",
-            "右键托盘图标 →「发送目标」里勾一台或多台。\n\n\
-             列表里没有设备的话：先在手机上打开「华为分享」并保持亮屏，\
-             等菜单里出现设备名再勾。",
-        );
+        let pending = crate::peers::wanted();
+        if pending.is_empty() {
+            crate::tray::alert(
+                "还没选发送目标",
+                "右键托盘图标 →「发送目标」里勾一台或多台。\n\n\
+                 列表里没有设备的话：先在手机上打开「华为分享」并保持亮屏，\
+                 等菜单里出现设备名再勾。",
+            );
+        } else {
+
+            let names = pending
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join("、");
+            crate::tray::alert(
+                "目标设备当前离线",
+                &format!(
+                    "「{names}」现在不可用：已经 15 秒没回发现包，或者对方关了华为分享。\n\n\
+                     在手机上打开「华为分享」并保持亮屏，它会自动回到目标里；\
+                     或者右键托盘 →「发送目标」改选别的设备。"
+                ),
+            );
+        }
         return;
     }
 
@@ -1650,12 +1635,12 @@ unsafe fn handle_drop(hdrop: *mut std::ffi::c_void) {
 
 pub fn toggle_drop() {
     if phase() != Phase::Hidden {
-        // 收起：先清 pinned，否则收尾逻辑会按「用户钉住的面板」把它叫回来。
+
         with_model(|m| {
             m.pinned = false;
             m.phase = Phase::Hidden;
         });
-        // 贴边时窗口大部分在屏幕外，光靠淡出 + SW_HIDE 会留一条残影。
+
         HIDE_NOW.store(true, Ordering::SeqCst);
         return;
     }
@@ -1677,9 +1662,7 @@ pub fn show_drop() {
         show_drop_panel();
         return;
     }
-    // 已经可见，但很可能正缩在屏幕边上（只露一条边）。以前这里「可见就什么都不做」，
-    // 于是重复双击 exe 时气泡说「已经帮你叫回来」，浮窗却一动不动。
-    // 现在请求心跳把它整个展开，并重新起 3 秒倒计时——和启动时"先展开看 3 秒再缩回"同一套。
+
     REVEAL.store(true, Ordering::SeqCst);
     ensure_thread();
     arm_timer();
@@ -1714,8 +1697,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 disarm_timer();
             }
 
-            // 每 100 ms 重建视图（排序 + clone 整个列表）纯属浪费：
-            // 只有 peers 变过（revision）或过了 1 秒（在线/离线会随时间变化）才需要。
             let now = now_ms();
             let view_dirty = with_model(|m| std::mem::replace(&mut m.view_dirty, false));
             let carousel_changed = tick_carousel(now);
@@ -1732,9 +1713,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if matches!(state, Phase::Done | Phase::Failed) {
                 let t = done_at();
                 if t != 0 && now.saturating_sub(t) > RESTORE_HOLD_MS {
-                    // 结果卡展示完：回到进入传输前的形态。
-                    // 以前这里无条件切回投放面板并把 pinned 置真，于是哪怕只是
-                    // 被动接收了一个文件，屏幕上也会永久多出一块「把文件拖进这里」。
+
                     let back = with_model(|m| {
                         m.done_at = 0;
                         m.restore.take()
@@ -1764,7 +1743,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if STARTUP_RESTORE.swap(false, Ordering::SeqCst) {
                     arm_restore_tuck();
                 } else if parked_edge() != crate::float::Edge::None {
-                    // 上次是缩在边上的：先展开给你看，3 秒后再自己缩回去。
+
                     show_expanded_keeping_edge(hwnd);
                     arm_restore_tuck();
                 } else {
@@ -1776,11 +1755,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 FADE_TO.store(255, Ordering::SeqCst);
             }
 
+            if with_edge(|s| s.restore_at) != 0
+                && cursor_inside()
+                && !busy_transfer()
+                && !crate::float::is_dragging()
+                && panel() == Panel::Drop
+                && VISIBLE.load(Ordering::SeqCst)
+                && phase() != Phase::Hidden
+            {
+
+                arm_restore_tuck();
+            }
+
             if restore_tuck_due() {
                 cancel_restore_tuck();
 
                 if !busy_transfer()
                     && !crate::float::is_dragging()
+                    && !cursor_inside()
                     && panel() == Panel::Drop
                     && VISIBLE.load(Ordering::SeqCst)
                     && phase() != Phase::Hidden
@@ -1863,7 +1855,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_LBUTTONDOWN => {
             let (x, y) = (lo_word(lparam), lo_word(lparam >> 16));
-            match hit_test(x, y) {
+            let hit = hit_test(x, y);
+            LAST_DOWN_HIT.store(hit as u8, Ordering::SeqCst);
+            match hit {
                 Hit::Close => hide_idle(),
                 Hit::Cancel => request_cancel(),
                 Hit::None => {
@@ -1883,7 +1877,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_LBUTTONDBLCLK => {
 
-            if panel() == Panel::Drop && phase() != Phase::Hidden {
+            if LAST_DOWN_HIT.load(Ordering::SeqCst) == Hit::None as u8 {
                 crate::tray::open_or_pick_dest(hwnd);
             }
             0
@@ -1943,7 +1937,7 @@ mod tests {
 
     #[test]
     fn state_numbers_stay_stable() {
-        // progress / tray 只按数字判断，别因为重构改了对外语义。
+
         assert_eq!(Phase::Hidden.code(), 0);
         assert_eq!(Phase::Active.code(), 1);
         assert_eq!(Phase::Done.code(), 2);
@@ -1962,17 +1956,17 @@ mod tests {
 
     #[test]
     fn done_goes_back_to_where_it_came_from() {
-        // 从钉住的投放面板发起：传完把面板还回去。
+
         assert_eq!(
             after_done(Some(Restore { panel: Panel::Drop, pinned: true })),
             After::DropPanel
         );
-        // 被动接收（浮窗原本不可见）：收起，而不是留一块面板在屏幕上。
+
         assert_eq!(
             after_done(Some(Restore { panel: Panel::Progress, pinned: false })),
             After::Hidden
         );
-        // 老路径没拍快照时也不能把面板叫回来。
+
         assert_eq!(after_done(None), After::Hidden);
     }
 
@@ -1984,7 +1978,6 @@ mod tests {
         arm_restore_tuck();
         assert!(!restore_tuck_due(), "刚起时还没到期");
 
-        // 直接把到期时刻挪到过去，模拟 3 秒已过。
         with_edge(|s| s.restore_at = now_ms().wrapping_sub(10));
         assert!(restore_tuck_due(), "过期应当触发");
         assert!(!restore_tuck_due(), "触发一次后必须清掉，不能连发");

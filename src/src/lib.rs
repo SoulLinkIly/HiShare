@@ -1,5 +1,3 @@
-//! crate 根：错误类型、帧编解码、TLV、密钥派生与 AES-GCM 封装。
-
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use hmac::{Hmac, Mac};
@@ -15,6 +13,7 @@ pub mod discovery;
 pub mod env;
 pub mod history;
 pub mod human;
+pub mod net;
 pub mod outbound;
 pub mod peers;
 pub mod progress;
@@ -66,14 +65,11 @@ pub mod tray;
 
 pub const FRAME_MAGIC_WORD: u32 = 0xBABE_FACE;
 pub const FRAME_HEADER_SIZE: usize = 24;
-/// 单帧载荷上限（数据帧）。
+
 pub const FRAME_MAX_PAYLOAD: usize = 65536;
-/// 信封通道（module 9）的帧载荷上限。
-///
-/// 文件清单、预览载荷是把整批元数据塞进一帧的，上千个文件轻松超过 64 KiB。
-/// 这里给一个宽松但有界的上限：既能让清单通过，又不至于被一个坏长度字段骗去分配几个 G。
+
 pub const FRAME_MAX_ENVELOPE: usize = 16 * 1024 * 1024;
-/// 认证 / 控制用的信封通道模块号。
+
 pub const ENVELOPE_MODULE: u32 = 9;
 pub const VARINT_MAX: u64 = (1 << 28) - 1;
 pub const GCM_KEY: usize = 32;
@@ -123,22 +119,14 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
-    /// 提示条标题。
-    ///
-    /// 只回答「成了没有」，不解释「为什么」——用户不关心是协议对不上还是包丢了，
-    /// 他要知道的是这次发没发出去。具体原因在正文的 [`Error::user_message`] 里。
+
     pub fn title(self) -> &'static str {
         self.title_for(false)
     }
 
-    /// 同上，但区分方向。
-    ///
-    /// 接收侧原本没有提示条，标题是写死「发送」的。收东西失败却飘一条
-    /// 「发送失败！」比不提示更糟——用户会以为是自己刚才那次发送出了问题。
-    /// 取消同理：发送有「已取消发送」，接收就得有「已取消接收」。
     pub fn title_for(self, recv: bool) -> &'static str {
         match (self, recv) {
-            // 取消是用户自己按的，不算失败，别用红字吓人。
+
             (ErrorKind::Cancelled, false) => "已取消发送",
             (ErrorKind::Cancelled, true) => "已取消接收",
             (_, false) => "发送失败！",
@@ -255,7 +243,6 @@ pub fn tlv_find(data: &[u8], tag: u64) -> Result<Option<&[u8]>> {
     Ok(None)
 }
 
-/// 组一帧（不做长度校验）。两个 `frame_encode*` 共用，以前是两份逐字节相同的拷贝。
 fn frame_build(module: u32, sequence: u64, flags: u32, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(FRAME_HEADER_SIZE + payload.len());
     out.extend_from_slice(&FRAME_MAGIC_WORD.to_le_bytes());
@@ -267,7 +254,6 @@ fn frame_build(module: u32, sequence: u64, flags: u32, payload: &[u8]) -> Vec<u8
     out
 }
 
-/// 常规帧：载荷上限 [`FRAME_MAX_PAYLOAD`]。
 pub fn frame_encode(module: u32, sequence: u64, flags: u32, payload: &[u8]) -> Result<Vec<u8>> {
     if payload.len() > FRAME_MAX_PAYLOAD {
         return Err(Error::Range);
@@ -275,7 +261,6 @@ pub fn frame_encode(module: u32, sequence: u64, flags: u32, payload: &[u8]) -> R
     Ok(frame_build(module, sequence, flags, payload))
 }
 
-/// 宽松帧：只受 u32 长度字段限制。给大块元数据用（如预览、取消帧）。
 pub fn frame_encode_lenient(
     module: u32,
     sequence: u64,
@@ -288,10 +273,6 @@ pub fn frame_encode_lenient(
     Ok(frame_build(module, sequence, flags, payload))
 }
 
-/// 从固定偏移读一个 LE u32，长度不够返回 `None`。
-///
-/// 协议解析里原来到处写 `data.get(4..8).map(|b| u32::from_le_bytes(b.try_into().unwrap()))`：
-/// 逻辑没错，但每个调用点都挂一条看着会 panic 的路径，读代码时要逐个确认。
 pub fn u32_at(data: &[u8], offset: usize) -> Option<u32> {
     let end = offset.checked_add(4)?;
     let bytes = data.get(offset..end)?;
@@ -300,10 +281,6 @@ pub fn u32_at(data: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes(buf))
 }
 
-/// 按**字符**（不是字节）截断，不补省略号。
-///
-/// 设备名、文件名这类协议字段只能用这个：补 "…" 会改掉字段内容，
-/// 而按字节切会把汉字切成半个。
 pub fn clip_chars(text: &str, max: usize) -> &str {
     match text.char_indices().nth(max) {
         Some((idx, _)) => &text[..idx],
@@ -329,7 +306,7 @@ pub fn frame_decode(data: &[u8]) -> Result<(u32, u32, u64, u32, u32)> {
     let mut seq = [0u8; 8];
     seq.copy_from_slice(seq_bytes);
     let sequence = u64::from_le_bytes(seq);
-    // 只有信封通道允许超过数据帧上限；其它模块的超大帧一律当非法输入。
+
     if len as usize > FRAME_MAX_PAYLOAD && module != ENVELOPE_MODULE {
         return Err(Error::Format);
     }
@@ -532,7 +509,6 @@ mod tests {
         assert_eq!(module, ENVELOPE_MODULE);
         assert_eq!(len as usize, big.len(), "信封通道的大帧必须能解出来");
 
-        // 同样的长度换个模块号就必须被拒。
         let f = frame_encode_lenient(0x15, 1, 0, &big).unwrap();
         assert_eq!(frame_decode(&f), Err(Error::Format));
     }
@@ -559,7 +535,7 @@ mod tests {
         assert_eq!(clip_chars("华为分享", 9), "华为分享", "不足时原样返回");
         assert_eq!(clip_chars("", 3), "");
         assert_eq!(clip_chars("abc", 0), "", "max=0 得到空串");
-        // 混合宽度：emoji 也是一个字符，且不能切在半个码点上。
+
         assert_eq!(clip_chars("a我🙂b", 3), "a我🙂");
     }
 
@@ -627,9 +603,7 @@ mod tests {
 
     #[test]
     fn kinds_carry_actionable_titles() {
-        // 标题只说「成了没有」。Busy / Rejected / Network / Protocol / Local 对用户
-        // 都是同一件事：这次没发出去。把「协议错误」摆在标题上是给开发者看的，
-        // 用户看到只会以为是自己的问题。
+
         for e in [
             Error::Busy,
             Error::Rejected(String::new()),
@@ -639,13 +613,13 @@ mod tests {
         ] {
             assert_eq!(e.kind().title(), "发送失败！", "{e:?}");
         }
-        // 取消是用户自己按的，不能报成失败。
+
         assert_eq!(Error::Cancelled(String::new()).kind().title(), "已取消发送");
         assert_eq!(
             Error::Cancelled(String::new()).kind().title_for(true),
             "已取消接收"
         );
-        // 接收侧不能沿用「发送失败！」，否则收失败时用户会去查自己刚发的东西。
+
         for e in [
             Error::Busy,
             Error::Rejected(String::new()),

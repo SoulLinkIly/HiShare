@@ -1,5 +1,3 @@
-//! 接收侧取消：解析控制通道上的取消指令，维护取消标志与排空帧记录。
-
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};

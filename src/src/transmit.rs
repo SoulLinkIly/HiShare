@@ -1,7 +1,3 @@
-//! 发送侧共用件：身份加载、offer 构建、批次分类与扩展名直方图。
-//!
-//! 文件收集（展开目录、算总字节）只有一份，在 `outbound::collect`。
-
 use std::path::{Path, PathBuf};
 
 use rsa::RsaPrivateKey;

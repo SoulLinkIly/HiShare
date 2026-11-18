@@ -1,6 +1,6 @@
 [package]
 name = "hishare"
-version = "1.8.0"
+version = "1.8.6"
 edition = "2021"
 description = "HiShare —— 华为分享 / 鸿蒙星河互联协议实现，同时支持鸿蒙手机 / 鸿蒙 7 与 iPad / iPhone"
 license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
@@ -41,6 +41,7 @@ base64 = "0.22"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_IpHelper",
     "Win32_System_SystemInformation",
     "Win32_System_IO",
     "Win32_Storage_FileSystem",

@@ -1,5 +1,3 @@
-//! 一次性通知卡：居中显示，点「好」或按回车关闭。
-
 #![cfg(windows)]
 
 use crate::ui::font::{WEIGHT_BOLD, WEIGHT_NORMAL};

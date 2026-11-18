@@ -1,5 +1,3 @@
-//! 接收流程编排：opening 握手 → 会话轮询落盘 → 记历史（确认结果由调用方传入）。
-
 mod cancel;
 mod clip;
 mod dfile;
@@ -52,28 +50,24 @@ pub struct Session {
     pub peer_apple: bool,
 }
 
-/// 一次「剪贴板文本」投递的结果。
-///
-/// 这类文件不落盘，所以它不会出现在 `saved` 里；但历史、日志、CLI 输出都得
-/// 知道这次到底收到了什么、复制成没成。
 #[derive(Debug, Clone)]
 pub struct ClipInfo {
-    /// 协议层收到的字节数
+
     pub bytes: usize,
-    /// 解码后的字符数（没投递成功时为 0）
+
     pub chars: usize,
-    /// 是否真的写进了剪贴板
+
     pub ok: bool,
-    /// 没写成功的原因；成功时为空串
+
     pub reason: String,
-    /// 跳过（内容为空）：既不算成功也不算失败，收尾时不该报警。
+
     pub skipped: bool,
 }
 
 pub struct ReceiveResult {
     pub saved: Vec<PathBuf>,
     pub bytes: u64,
-    /// 会话里收到的剪贴板文本（不落盘）。`None` 表示这次没有这种文件。
+
     pub clip: Option<ClipInfo>,
 }
 
@@ -141,8 +135,7 @@ pub fn run_session(
             .collect(),
         Err(_) => Vec::new(),
     };
-    // 剪贴板文本没有文件可列，但历史里得留一行：用户要知道这次收到的是一段
-    // 文字，而不是「什么都没收到」。
+
     let mut clip_note = String::new();
     if let Ok(result) = &outcome {
         if let Some(info) = &result.clip {
@@ -186,35 +179,19 @@ pub fn run_session(
     outcome
 }
 
-/// 一次接收结束后，右下角提示条该说什么。`None` 表示**不该打扰用户**。
-///
-/// 这是接收侧唯一的提示出口。以前这里什么都没有：发送收到结果会飘「发送完成」，
-/// 接收收完了却只在历史里记一笔——用户看着浮窗走完就消失，文件去哪了、收了多少
-/// 完全没有反馈，两端体验不对称。分散在各处的提示（剪贴板那条）又会在同一件事上
-/// 说出互相矛盾的两句。所以规则集中在这里，一次接收最多一条：
-///
-/// | 情况 | 提示 |
-/// |---|---|
-/// | 成功，收到文件/文本 | 「接收完成」+ 数量与体积 |
-/// | 成功，但剪贴板没写进去（还有文件） | 「接收完成」，正文注明剪贴板未更新 |
-/// | 成功，但只收到一段没法投递的文本 | 「接收失败！」+ 原因（等于什么都没拿到） |
-/// | 用户自己点了「拒绝」 | 不提示（他刚点的，再飘一条是噪音；历史里仍有记录） |
-/// | 成功但一个字节也没收到 | 不提示（对端发了个空清单，没必要报告「收到 0 个」） |
-/// | 中断/取消/网络错误 | 「接收失败！」或「已取消接收」+ 原因 |
 pub fn toast_for(
     peer: &str,
     accepted: bool,
     result: Option<&ReceiveResult>,
     err: Option<&Error>,
 ) -> Option<(String, String)> {
-    // `peer` 是 `ip:端口`。端口对用户没意义（手机每次重开分享都会换），只留地址。
+
     let ip = peer.rsplit_once(':').map(|(host, _)| host).unwrap_or(peer);
 
     if let Some(e) = err {
         return Some((
             e.kind().title_for(true).to_string(),
-            // 原因在前、来源在后：正文只有一行，放不下时被省略号吃掉的是末尾，
-            // 而「为什么没成」比「哪台设备」更值钱。
+
             format!("{} · 来自 {ip}", strip_result_word(&e.user_message())),
         ));
     }
@@ -229,11 +206,10 @@ pub fn toast_for(
     let clip_ok = clip.is_some_and(|c| c.ok);
     let clip_bad = clip.is_some_and(|c| !c.ok && !c.skipped);
 
-    // 什么都没拿到（空清单，或只有一段空文本）：不值得弹。
     if files == 0 && !clip_ok && !clip_bad {
         return None;
     }
-    // 只有一段投递不出去的文本 —— 用户期待的是剪贴板里的字，没拿到就是失败。
+
     if files == 0 && clip_bad {
         return Some((
             "接收失败！".to_string(),
@@ -261,7 +237,7 @@ pub fn toast_for(
         }
     }
     if clip_bad && files > 0 {
-        // 正文只有一行，放不下完整原因；结论（剪贴板没更新）在这儿，细节在日志里。
+
         body.push_str("（剪贴板未更新）");
     }
     body.push_str(&format!(" · 来自 {ip}"));
@@ -269,8 +245,6 @@ pub fn toast_for(
     Some(("接收完成".to_string(), body))
 }
 
-/// 底层消息经常自带「接收失败：」前缀（`channel.rs` 是给日志/历史写的）。
-/// 标题已经说过一次了，留在正文里既重复，又把真正有用的原因挤到省略号后面。
 fn strip_result_word(msg: &str) -> &str {
     for prefix in ["接收失败：", "接收失败:", "发送失败：", "发送失败:"] {
         if let Some(rest) = msg.strip_prefix(prefix) {
@@ -459,8 +433,6 @@ mod tests {
         assert!(hex_head(&[0xAB; 100]).ends_with('…'));
     }
 
-    // ------------------------------------------------ 收尾提示文案
-
     fn ok_result(files: usize, bytes: u64, clip: Option<ClipInfo>) -> ReceiveResult {
         ReceiveResult {
             saved: (0..files)
@@ -486,7 +458,7 @@ mod tests {
         let r = ok_result(3, 13 * 1024 * 1024, None);
         let (title, body) = toast_for("192.168.1.9:5684", true, Some(&r), None).unwrap();
         assert_eq!(title, "接收完成");
-        // 端口不进正文（手机会换端口），但设备地址要在。
+
         assert_eq!(body, "收到 3 个文件 · 13.0 MB · 来自 192.168.1.9");
     }
 
@@ -514,13 +486,12 @@ mod tests {
 
     #[test]
     fn clip_failure_alone_is_a_failure_but_not_when_files_arrived() {
-        // 只收到一段没写进剪贴板的文本：等于什么都没拿到。
+
         let only_text = ok_result(0, 80, Some(clip(false, false, 0, "剪贴板写入失败：被占用")));
         let (title, body) = toast_for("10.0.0.2:1", true, Some(&only_text), None).unwrap();
         assert_eq!(title, "接收失败！");
         assert!(body.contains("被占用"), "{body}");
 
-        // 文件都收到了，剪贴板只是附带：结论仍是成功，尾注提一句。
         let with_files = ok_result(4, 4096, Some(clip(false, false, 0, "被占用")));
         let (title, body) = toast_for("10.0.0.2:1", true, Some(&with_files), None).unwrap();
         assert_eq!(title, "接收完成");
@@ -537,10 +508,10 @@ mod tests {
 
     #[test]
     fn rejection_and_empty_session_stay_silent() {
-        // 用户自己点了「拒绝」——刚点的，再飘一条是噪音。
+
         let rejected = ok_result(0, 0, None);
         assert!(toast_for("10.0.0.2:1", false, Some(&rejected), None).is_none());
-        // 成功但一个字节也没收到：不弹「收到 0 个文件」。
+
         assert!(toast_for("10.0.0.2:1", true, Some(&rejected), None).is_none());
     }
 
@@ -558,8 +529,7 @@ mod tests {
 
     #[test]
     fn duplicated_result_word_is_stripped_from_the_body() {
-        // `channel.rs` 拼出来的原话就带这个前缀，实测会显示成
-        // 「接收失败！/ 192.168.1.5：接收失败：对方中断了分享…」，一句话两遍。
+
         let e = Error::Network("接收失败：对方中断了分享（已收 72.8 MB）".into());
         let (_, body) = toast_for("192.168.1.5:5684", true, None, Some(&e)).unwrap();
         assert_eq!(body, "对方中断了分享（已收 72.8 MB） · 来自 192.168.1.5");

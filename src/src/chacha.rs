@@ -1,5 +1,3 @@
-//! 标准 ChaCha20-Poly1305（RFC 8439，12 字节 nonce），用于数据帧加密。
-
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

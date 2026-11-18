@@ -1,5 +1,3 @@
-//! 数据目录（`%LOCALAPPDATA%\HiShare`）：home() 与 path()。
-
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
