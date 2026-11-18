@@ -126,14 +126,8 @@ if ($env:HISHARE_TARGET_DIR) { $targetDir = $env:HISHARE_TARGET_DIR }
 $env:CARGO_TARGET_DIR = $targetDir
 
 # ---------------------------------------------------------------- path remap
-# panic messages carry the absolute path of the .rs file that panicked. For
-# third-party crates that path is the registry cache, so a shipped exe leaks
-# the builder's user name and directory layout ("E:\work\soft\rust\cargo\..."
-# was readable with strings). --remap-path-prefix rewrites those prefixes at
-# compile time into stable fake roots: the text stays useful for debugging,
-# but every machine produces the same bytes.
-#
-# Longest prefix wins in rustc, so specific roots may be listed in any order.
+# Rewrite build-machine prefixes inside panic Location strings to stable roots.
+# Longest prefix wins in rustc, so listing order does not matter.
 # Paths containing spaces are skipped: RUSTFLAGS is split on whitespace and
 # there is no quoting that survives that split.
 $remapPairs = @(

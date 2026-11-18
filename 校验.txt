@@ -13,10 +13,6 @@ hishare-cli.exe         1190400   bf1020e7693f37a6f725abd5ad267e25f628484145e141
 注意：手敲 cargo build 不会跑 build.rs 里的 windres 步骤，产物没有图标/版本资源，
       大小与上面不同属正常。发版请用 build.ps1。
 
-      二进制里不含构建机的绝对路径：build.ps1 会用 --remap-path-prefix 把
-      依赖目录、target 目录、用户目录改写成 /rust/cargo、/target、/user 这类
-      固定前缀，所以换目录、换用户名重建都能得到上面这串哈希。
-
 核对方法（PowerShell）：
     Get-FileHash .\bin\hishare.exe -Algorithm SHA256
     (Get-Item .\bin\hishare.exe).VersionInfo.FileVersion
@@ -24,8 +20,7 @@ hishare-cli.exe         1190400   bf1020e7693f37a6f725abd5ad267e25f628484145e141
 目录：
   bin\      成品（hishare.exe 托盘程序、hishare-cli.exe 命令行）
   src\      全部源码 + Cargo.toml/lock + build.ps1 + build.rs + assets\ + tests\
-            源码不带注释（构建脚本的用法注释除外）；开发笔记与抓包样本不随发布包提供
-  README.md / 版本说明.md / 使用说明.md / LICENSE / NOTICE.md / 构建.bat
+README.md / 版本说明.md / 使用说明.md / LICENSE / NOTICE.md / 构建.bat
 
 以上即发布包全部内容：根目录 7 个文件 + bin\ 两个 exe + src\，没有别的目录。
 用 src\build.ps1 可自行重建；手敲 cargo build 会丢图标与版本资源。
